@@ -1,0 +1,22 @@
+engine:
+  recovery_rate: 0.40
+  n_names: 125
+  payment_freq_per_year: 4
+  day_count: "ACT/360"
+integration:
+  method: "gauss_hermite"
+  n_quad: 64
+calibration:
+  root_finder: "brentq"
+  rho_bounds: [1e-4, 0.999]
+  tol: 1e-10
+interpolation:
+  method: "pchip"
+arbitrage:
+  enable_fix: true
+risk:
+  bump_bp: 1.0
+  mode: "fast"
+data_qc:
+  stale_threshold: 3.0
+  min_constituents: 100
