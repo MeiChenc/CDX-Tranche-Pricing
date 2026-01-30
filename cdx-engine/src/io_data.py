@@ -255,6 +255,8 @@ def plot_discount_factors(
     payment_freq: int = 4,
     target_date: pd.Timestamp | None = None,
     output_path: str | None = None,
+    output_table_path: str | None = None,
+    output_table_txt_path: str | None = None,
     show_plot: bool = True,
     print_table: bool = True,
     print_ascii: bool = True,
@@ -334,7 +336,14 @@ def plot_discount_factors(
     cons_vals = np.array([cons_curve.survival(t) for t in ts])
 
     if output_path is None:
-        output_path = "plots/discount_factors.png"
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_path = str(plots_dir / "discount_factors.png")
+    if output_table_path is None:
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_table_path = str(plots_dir / "discount_factors.csv")
+    if output_table_txt_path is None:
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_table_txt_path = str(plots_dir / "discount_factors_table.txt")
 
     import matplotlib.pyplot as plt
 
@@ -378,6 +387,12 @@ def plot_discount_factors(
             "constituent_df": [_df_curve(cons_curve, float(t)) for t in table_ts],
         }
     )
+    Path(output_table_path).parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(output_table_path, index=False)
+    Path(output_table_txt_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_table_txt_path, "w", encoding="utf-8") as fh:
+        fh.write(table.to_string(index=False))
+        fh.write("\n")
     if print_table:
         print(table.to_string(index=False))
 
