@@ -13,6 +13,18 @@ This folder contains a minimal CDX tranche pricing engine aligned to the project
 pip install -r requirements.txt
 ```
 
+## Plotting
+
+Generate basis-adjustment diagnostics (expected-loss comparison + beta curve) using the latest available date:
+
+```bash
+python scripts/plot_basis_adjustment.py
+```
+
+Outputs:
+- `plots/expected_loss_compare_<YYYY-MM-DD>.png`
+- `plots/basis_beta_<YYYY-MM-DD>.png`
+
 ## Layout
 
 ```

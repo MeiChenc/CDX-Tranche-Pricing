@@ -15,8 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.basis import basis_adjust_curves_beta, build_average_curve
 from src.calibration_basecorr import calibrate_basecorr_from_quotes
-from src.curves import build_index_curve
+from src.curves import Curve, build_constituent_curves, build_index_curve
 from src.io_data import read_ois_discount_curve
 from src.pricer_tranche import price_tranche_lhp, tranche_expected_loss
 from src.utils_math import hermite_nodes_weights
@@ -44,6 +45,65 @@ def _build_curve(
     index_spreads = (snapshot["Index_Mid"].to_numpy(dtype=float)) / 10000.0
     curve = build_index_curve(tenors, index_spreads, recovery=0.4, disc_curve=disc_curve)
     return tenors, curve
+
+
+def _parse_tenor(text: str) -> float:
+    value = text.strip().upper()
+    if value.endswith("Y"):
+        return float(value[:-1])
+    if value.endswith("M"):
+        return float(value[:-1]) / 12.0
+    if value.endswith("W"):
+        return float(value[:-1]) / 52.0
+    return float(value)
+
+
+def _build_basis_adjusted_curve(
+    target_date: date_type,
+    tenors: np.ndarray,
+    index_curve: Curve,
+    disc_curve,
+    recovery: float,
+) -> tuple[Curve, np.ndarray] | None:
+    cons_df = pd.read_csv("data/constituents_timeseries.csv", parse_dates=["Date"])
+    cons_slice = cons_df[cons_df["Date"].dt.date == target_date].copy()
+    if cons_slice.empty:
+        logging.warning("No constituent data for %s; skipping basis adjustment.", target_date)
+        return None
+
+    spread_cols = {}
+    for col in cons_slice.columns:
+        if col.lower().startswith("spread_"):
+            tenor = _parse_tenor(col.split("_", 1)[1])
+            spread_cols[tenor] = col
+
+    tenor_list = [float(t) for t in tenors]
+    missing = [t for t in tenor_list if t not in spread_cols]
+    if missing:
+        logging.warning("Missing constituent spreads for tenors %s; skipping basis adjustment.", missing)
+        return None
+
+    cols = [spread_cols[t] for t in tenor_list]
+    cons_spreads = cons_slice[cols].dropna(how="any")
+    if cons_spreads.empty:
+        logging.warning("Constituent spreads empty after filtering; skipping basis adjustment.")
+        return None
+
+    spreads_matrix = cons_spreads.to_numpy(dtype=float) / 10000.0
+    constituent_curves = build_constituent_curves(
+        tenor_list,
+        spreads_matrix,
+        recovery=recovery,
+        payment_freq=4,
+        disc_curve=disc_curve,
+    )
+    adjusted_curves, betas = basis_adjust_curves_beta(
+        constituent_curves,
+        index_curve,
+        recovery=recovery,
+    )
+    adjusted_index_curve = build_average_curve(adjusted_curves)
+    return adjusted_index_curve, betas
 
 
 def _row_quotes(row: pd.Series) -> tuple[Dict[float, float], Dict[float, float], List[float]]:
@@ -158,6 +218,12 @@ def main() -> None:
 
     disc_curve = read_ois_discount_curve("data/ois_timeseries.csv", target_date)
     tenors, curve = _build_curve(snapshot, disc_curve)
+    basis_adjusted = _build_basis_adjusted_curve(target_date, tenors, curve, disc_curve, recovery=0.4)
+    if basis_adjusted is not None:
+        curve, betas = basis_adjusted
+        logging.info("Applied basis beta adjustment. Betas=%s", np.round(betas, 6).tolist())
+    else:
+        logging.info("Basis adjustment skipped; using index curve for base correlation.")
 
     tenors_sorted = np.sort(tenors)
     dets = [0.03, 0.07, 0.10, 0.15]

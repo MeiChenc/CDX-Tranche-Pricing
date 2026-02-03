@@ -206,8 +206,22 @@ def build_index_curve(
     )
 
 
-def build_constituent_curves(tenors: Iterable[float], spreads_matrix: np.ndarray, recovery: float) -> list[Curve]:
+def build_constituent_curves(
+    tenors: Iterable[float],
+    spreads_matrix: np.ndarray,
+    recovery: float,
+    payment_freq: int = 4,
+    disc_curve: Optional[Callable[[float], float] | Curve] = None,
+) -> list[Curve]:
     curves: list[Curve] = []
     for spreads in spreads_matrix:
-        curves.append(bootstrap_from_cds_spreads(tenors, spreads, recovery))
+        curves.append(
+            bootstrap_from_cds_spreads(
+                tenors,
+                spreads,
+                recovery,
+                payment_freq=payment_freq,
+                disc_curve=disc_curve,
+            )
+        )
     return curves
