@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Sequence, Tuple
-
+from typing import Callable, Iterable, Optional, Sequence, Tuple ##check meaning
 import numpy as np
 from scipy.optimize import brentq
 
@@ -12,11 +11,11 @@ class Curve:
     times: np.ndarray
     hazard: np.ndarray
 
-    def survival(self, t: float) -> float:
+    def survival(self, t: float) -> float: #is it the 
         times = np.asarray(self.times)
         hazard = np.asarray(self.hazard)
         if t <= times[0]:
-            return float(np.exp(-hazard[0] * t))
+            return float(np.exp(-hazard[0] * t)) 
         integral = 0.0
         prev = 0.0
         for time, hz in zip(times, hazard):
@@ -28,12 +27,12 @@ class Curve:
                 break
         if t > times[-1]:
             integral += hazard[-1] * (t - times[-1])
-        return float(np.exp(-integral))
+        return float(np.exp(-integral)) #prob. of survive calculated by hazard rate at t for each CDS
 
     def default_prob(self, t: float) -> float:
-        return 1.0 - self.survival(t)
+        return 1.0 - self.survival(t) #Prob. of default
 
-
+# The simple cal. for hazard rate? DO WE NEED TO KEEP THIS ?? 
 def bootstrap_from_spreads(tenors: Iterable[float], spreads: Iterable[float], recovery: float) -> Curve:
     """
     Simple hazard approximation: λ ≈ S / (1 - R).
@@ -187,16 +186,17 @@ def bootstrap_from_cds_spreads(
 def build_index_curve(
     tenors: Iterable[float],
     index_spreads: Iterable[float],
-    recovery: float,
-    payment_freq: int = 4,
-    disc_curve: Optional[Callable[[float], float] | Curve] = None,
+    recovery: float, #=0.4
+    payment_freq: int = 4, #quarterly
+    disc_curve: Optional[Callable[[float], float] | Curve] = None, 
 ) -> Curve:
     """
-    Build index hazard curve from par spreads using piecewise-constant bootstrapping.
+    Build index hazard curve from par spreads (mid spread of everyday) using piecewise-constant bootstrapping.
 
     Spreads are decimal (e.g. 100bp = 0.01). Discounting is optional; if omitted
-    the function assumes DF(t)=1 for stability in notebooks/tests.
+    the function assumes DF(t)=1 for stability in notebooks/tests. 
     """
+    # Can we assume DF = 1?
     return bootstrap_from_cds_spreads(
         tenors,
         index_spreads,
@@ -206,22 +206,8 @@ def build_index_curve(
     )
 
 
-def build_constituent_curves(
-    tenors: Iterable[float],
-    spreads_matrix: np.ndarray,
-    recovery: float,
-    payment_freq: int = 4,
-    disc_curve: Optional[Callable[[float], float] | Curve] = None,
-) -> list[Curve]:
+def build_constituent_curves(tenors: Iterable[float], spreads_matrix: np.ndarray, recovery: float) -> list[Curve]:
     curves: list[Curve] = []
     for spreads in spreads_matrix:
-        curves.append(
-            bootstrap_from_cds_spreads(
-                tenors,
-                spreads,
-                recovery,
-                payment_freq=payment_freq,
-                disc_curve=disc_curve,
-            )
-        )
+        curves.append(bootstrap_from_cds_spreads(tenors, spreads, recovery))
     return curves

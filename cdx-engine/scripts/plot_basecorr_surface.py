@@ -15,9 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.basis import basis_adjust_curves_beta, build_average_curve
-from src.calibration_basecorr import calibrate_basecorr_from_quotes
-from src.curves import Curve, build_constituent_curves, build_index_curve
+from src.calibration_basecorr_relaxed import calibrate_basecorr_relaxed
+from src.basis_adjustment_utils import build_basis_adjusted_curve
+from src.curves import build_index_curve
 from src.io_data import read_ois_discount_curve
 from src.pricer_tranche import price_tranche_lhp, tranche_expected_loss
 from src.utils_math import hermite_nodes_weights
@@ -26,8 +26,8 @@ from src.utils_math import hermite_nodes_weights
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot base correlation surface from CDX time series data.")
     parser.add_argument("--date", type=str, default=None, help="Date to plot (YYYY-MM-DD). Defaults to latest.")
-    parser.add_argument("--n-quad", type=int, default=32, help="Gauss-Hermite nodes for pricing.")
-    parser.add_argument("--grid-size", type=int, default=101, help="Grid size for bracketing search.")
+    parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite nodes for pricing.")
+    parser.add_argument("--grid-size", type=int, default=200, help="Grid size for bracketing search.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG/INFO/WARNING).")
     return parser.parse_args()
 
@@ -37,73 +37,17 @@ def _coerce_numeric(df: pd.DataFrame, cols: List[str]) -> None:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
 
+
 def _build_curve(
     snapshot: pd.DataFrame,
     disc_curve,
 ) -> tuple[np.ndarray, np.ndarray]:
     tenors = snapshot["tenor"].to_numpy(dtype=float)
-    index_spreads = (snapshot["Index_Mid"].to_numpy(dtype=float)) / 10000.0
+    index_spreads = (snapshot["Index_Mid"].to_numpy(dtype=float)) / 10000.0 #Use mid spread for calculation
     curve = build_index_curve(tenors, index_spreads, recovery=0.4, disc_curve=disc_curve)
     return tenors, curve
 
 
-def _parse_tenor(text: str) -> float:
-    value = text.strip().upper()
-    if value.endswith("Y"):
-        return float(value[:-1])
-    if value.endswith("M"):
-        return float(value[:-1]) / 12.0
-    if value.endswith("W"):
-        return float(value[:-1]) / 52.0
-    return float(value)
-
-
-def _build_basis_adjusted_curve(
-    target_date: date_type,
-    tenors: np.ndarray,
-    index_curve: Curve,
-    disc_curve,
-    recovery: float,
-) -> tuple[Curve, np.ndarray] | None:
-    cons_df = pd.read_csv("data/constituents_timeseries.csv", parse_dates=["Date"])
-    cons_slice = cons_df[cons_df["Date"].dt.date == target_date].copy()
-    if cons_slice.empty:
-        logging.warning("No constituent data for %s; skipping basis adjustment.", target_date)
-        return None
-
-    spread_cols = {}
-    for col in cons_slice.columns:
-        if col.lower().startswith("spread_"):
-            tenor = _parse_tenor(col.split("_", 1)[1])
-            spread_cols[tenor] = col
-
-    tenor_list = [float(t) for t in tenors]
-    missing = [t for t in tenor_list if t not in spread_cols]
-    if missing:
-        logging.warning("Missing constituent spreads for tenors %s; skipping basis adjustment.", missing)
-        return None
-
-    cols = [spread_cols[t] for t in tenor_list]
-    cons_spreads = cons_slice[cols].dropna(how="any")
-    if cons_spreads.empty:
-        logging.warning("Constituent spreads empty after filtering; skipping basis adjustment.")
-        return None
-
-    spreads_matrix = cons_spreads.to_numpy(dtype=float) / 10000.0
-    constituent_curves = build_constituent_curves(
-        tenor_list,
-        spreads_matrix,
-        recovery=recovery,
-        payment_freq=4,
-        disc_curve=disc_curve,
-    )
-    adjusted_curves, betas = basis_adjust_curves_beta(
-        constituent_curves,
-        index_curve,
-        recovery=recovery,
-    )
-    adjusted_index_curve = build_average_curve(adjusted_curves)
-    return adjusted_index_curve, betas
 
 
 def _row_quotes(row: pd.Series) -> tuple[Dict[float, float], Dict[float, float], List[float]]:
@@ -112,62 +56,15 @@ def _row_quotes(row: pd.Series) -> tuple[Dict[float, float], Dict[float, float],
         0.07: row["Mezz_3_7_Spread"] / 10000.0,
         0.10: row["Mezz_7_10_Spread"] / 10000.0,
         0.15: row["Senior_10_15_Spread"] / 10000.0,
-        1.00: row["SuperSenior_15_100_Spread"] / 10000.0,
     }
     tranche_upfronts = {
         0.03: row["Equity_0_3_Upfront"] / 100.0,
         0.07: row["Mezz_3_7_Upfront"] / 100.0,
     }
-    dets = [0.03, 0.07, 0.10, 0.15, 1.00]
+    dets = [0.03, 0.07, 0.10, 0.15]
     return tranche_spreads, tranche_upfronts, dets
 
 
-def _log_diagnostics(
-    tenor: float,
-    dets: list[float],
-    tranche_spreads: dict[float, float],
-    tranche_upfronts: dict[float, float],
-    curve,
-    disc_curve,
-    recovery: float,
-    n_quad: int,
-    payment_freq: int,
-    rho_vals: tuple[float, float],
-) -> None:
-    times = np.linspace(0.0, tenor, int(tenor * payment_freq) + 1)[1:]
-    default_probs = np.array([curve.default_prob(t) for t in times])
-    dfs = np.array([disc_curve(t) for t in times]) if disc_curve is not None else np.ones_like(times)
-    implied_rates = np.where(times > 0, -np.log(np.maximum(dfs, 1e-16)) / times, 0.0)
-
-    nodes, weights = hermite_nodes_weights(n_quad)
-    logging.info("Hermite scaled_weights sum=%.6f, first5=%s", float(weights.sum()), np.round(weights[:5], 6).tolist())
-    logging.info("Default prob: min=%.6g max=%.6g", float(default_probs.min()), float(default_probs.max()))
-    logging.info("Implied OIS rate: min=%.6g max=%.6g", float(implied_rates.min()), float(implied_rates.max()))
-
-    prev_k = 0.0
-    for det in dets:
-        k1, k2 = prev_k, det
-        spread = tranche_spreads.get(det, 0.0)
-        upfront = tranche_upfronts.get(det, 0.0)
-        for rho in rho_vals:
-            losses = np.array(
-                [tranche_expected_loss(curve.default_prob(t), k1, k2, rho, recovery, n_quad) for t in times]
-            )
-            pv = price_tranche_lhp(
-                tenor, k1, k2, rho, curve, recovery, n_quad=n_quad, payment_freq=payment_freq
-            )
-            target_pv = pv.protection_leg - spread * pv.premium_leg + upfront * (k2 - k1)
-            logging.info(
-                "det=%.2f rho=%.6f | exp_loss[min,max]=[%.6g, %.6g] | prem=%.6g prot=%.6g obj=%.6g",
-                det,
-                rho,
-                float(losses.min()),
-                float(losses.max()),
-                pv.premium_leg,
-                pv.protection_leg,
-                target_pv,
-            )
-        prev_k = det
 
 
 def main() -> None:
@@ -186,7 +83,6 @@ def main() -> None:
         "Mezz_3_7_Upfront",
         "Mezz_7_10_Spread",
         "Senior_10_15_Spread",
-        "SuperSenior_15_100_Spread",
     ]
     _coerce_numeric(index_df, numeric_cols)
 
@@ -217,13 +113,15 @@ def main() -> None:
         snapshot = valid[valid["Date"].dt.date == target_date].copy()
 
     disc_curve = read_ois_discount_curve("data/ois_timeseries.csv", target_date)
-    tenors, curve = _build_curve(snapshot, disc_curve)
-    basis_adjusted = _build_basis_adjusted_curve(target_date, tenors, curve, disc_curve, recovery=0.4)
-    if basis_adjusted is not None:
-        curve, betas = basis_adjusted
-        logging.info("Applied basis beta adjustment. Betas=%s", np.round(betas, 6).tolist())
-    else:
-        logging.info("Basis adjustment skipped; using index curve for base correlation.")
+    tenors, index_curve = _build_curve(snapshot, disc_curve)
+    cons_df = pd.read_csv(ROOT / "data" / "constituents_timeseries.csv", parse_dates=["Date"])
+    curve = build_basis_adjusted_curve(target_date, snapshot, cons_df, disc_curve)
+    logging.info("Using basis-adjusted curve for tranche pricing.")
+    logging.info("DEBUG: Index lambdas by tenor: %s", dict(zip(tenors, curve.hazard)))
+    surv = {float(t): curve.survival(float(t)) for t in tenors}
+    dprob = {float(t): curve.default_prob(float(t)) for t in tenors}
+    logging.info("DEBUG: Index survival by tenor: %s", surv)
+    logging.info("DEBUG: Index default prob by tenor: %s", dprob)
 
     tenors_sorted = np.sort(tenors)
     dets = [0.03, 0.07, 0.10, 0.15]
@@ -233,36 +131,25 @@ def main() -> None:
     for j, tenor in enumerate(tenors_sorted):
         row = snapshot[snapshot["tenor"] == tenor].iloc[0]
         tranche_spreads, tranche_upfronts, _ = _row_quotes(row)
-        try:
-            basecorr = calibrate_basecorr_from_quotes(
-                tenor,
-                dets,
-                tranche_spreads,
-                tranche_upfronts,
-                curve,
-                recovery=0.4,
-                grid_size=args.grid_size,
-                n_quad=args.n_quad,
-            )
-        except ValueError as exc:
-            logging.warning("Calibration failed for tenor %.2f: %s", tenor, exc)
-            _log_diagnostics(
-                tenor,
-                dets,
-                tranche_spreads,
-                tranche_upfronts,
-                curve,
-                disc_curve,
-                recovery=0.4,
-                n_quad=args.n_quad,
-                payment_freq=4,
-                rho_vals=(1e-4, 0.999),
-            )
-            continue
+        logging.info("Using coarse grid basecorr fit (grid_size=%d, n_quad=%d).", args.grid_size, args.n_quad)
+        basecorr = calibrate_basecorr_relaxed(
+            tenor,
+            dets,
+            tranche_spreads,
+            tranche_upfronts,
+            curve,
+            recovery=0.4,
+            grid_size=args.grid_size,
+            n_quad=args.n_quad,
+            payment_freq=4,
+            disc_curve=disc_curve,
+        )
 
         for i, det in enumerate(dets):
             surface[i, j] = basecorr.get(det, np.nan)
         logging.info("Tenor %.2f basecorr: %s", tenor, {d: basecorr.get(d, np.nan) for d in dets})
+        for det in dets:
+            logging.info("Calibrated rho for tenor %.2f det %.2f: %.6f", tenor, det, basecorr.get(det, np.nan))
 
     # Drop tenors with missing calibrations to avoid NaN surfaces.
     valid_cols = np.all(np.isfinite(surface), axis=0)

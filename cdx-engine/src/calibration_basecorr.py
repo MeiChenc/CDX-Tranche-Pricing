@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 import numpy as np
 from scipy.optimize import brentq
@@ -61,13 +61,14 @@ def calibrate_basecorr_curve(
     calibrated: Dict[float, float] = {}
 
     prev_k = 0.0
+    prev_base_pv = 0.0
     for det in dets:
         k1, k2 = prev_k, det
         target_pv = market_pvs[det]
 
         def objective(rho: float) -> float:
-            pv = price_tranche_lhp(tenor, k1, k2, rho, curve, recovery, n_quad=n_quad).pv
-            return pv - target_pv
+            base_pv = price_tranche_lhp(tenor, 0.0, k2, rho, curve, recovery, n_quad=n_quad).pv
+            return (base_pv - prev_base_pv) - target_pv
 
         rho = _solve_bracketed_root(
             objective,
@@ -78,6 +79,7 @@ def calibrate_basecorr_curve(
         )
         calibrated[det] = rho
         prev_k = det
+        prev_base_pv = price_tranche_lhp(tenor, 0.0, det, rho, curve, recovery, n_quad=n_quad).pv
 
     return calibrated
 
@@ -105,10 +107,19 @@ def calibrate_basecorr_from_quotes(
         tranche_width = k2 - k1
 
         def objective(rho: float) -> float:
-            pv = price_tranche_lhp(
-                tenor, k1, k2, rho, curve, recovery, n_quad=n_quad, payment_freq=payment_freq
+            base_hi = price_tranche_lhp(
+                tenor, 0.0, k2, rho, curve, recovery, n_quad=n_quad, payment_freq=payment_freq
             )
-            return pv.protection_leg - spread * pv.premium_leg + upfront * tranche_width
+            base_lo = (
+                price_tranche_lhp(
+                    tenor, 0.0, k1, calibrated[k1], curve, recovery, n_quad=n_quad, payment_freq=payment_freq
+                )
+                if k1 > 0
+                else None
+            )
+            prem_leg = base_hi.premium_leg - (base_lo.premium_leg if base_lo else 0.0)
+            prot_leg = base_hi.protection_leg - (base_lo.protection_leg if base_lo else 0.0)
+            return prot_leg - spread * prem_leg + upfront * tranche_width
 
         rho = _solve_bracketed_root(
             objective,

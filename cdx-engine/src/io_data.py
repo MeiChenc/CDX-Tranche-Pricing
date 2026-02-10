@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, List, Tuple
 
 import pandas as pd
@@ -228,3 +229,171 @@ def read_ois_discount_curve(
         return float(np.exp(-r * t))
 
     return df
+
+
+def _ois_curve_from_csv(ois_csv: str, target_date: pd.Timestamp) -> "Curve":
+    from src.curves import Curve
+
+    ois_df = pd.read_csv(ois_csv, parse_dates=["Date"])
+    ois_df = _normalize_columns(ois_df)
+    ois_df = _coerce_tenor_column(ois_df)
+    ois_slice = ois_df[ois_df["Date"].dt.normalize() == target_date].copy()
+    if ois_slice.empty:
+        raise ValueError(f"No OIS rows found for date {target_date}.")
+
+    tenors = ois_slice["tenor"].to_numpy(dtype=float)
+    rates = ois_slice["OIS_Rate"].to_numpy(dtype=float) / 100.0
+    order = np.argsort(tenors)
+    return Curve(times=tenors[order], hazard=rates[order])
+
+
+def plot_discount_factors(
+    ois_csv: str,
+    cdx_csv: str,
+    constituents_csv: str,
+    recovery_rate: float,
+    payment_freq: int = 4,
+    target_date: pd.Timestamp | None = None,
+    output_path: str | None = None,
+    output_table_path: str | None = None,
+    output_table_txt_path: str | None = None,
+    show_plot: bool = True,
+    print_table: bool = True,
+    print_ascii: bool = True,
+) -> pd.DataFrame:
+    """
+    Plot discount factors using OIS, index, and constituent data.
+
+    Notes:
+    - OIS curve uses OIS_Rate as continuous zero rate.
+    - Index/constituent curves are hazard curves bootstrapped from CDS spreads.
+    - Uses `_discount_factor` semantics: DF(t)=survival(t) for Curve.
+    """
+    from src.curves import Curve, build_index_curve
+    from src.curves import _discount_factor as _df_curve
+
+    ois_df = pd.read_csv(ois_csv, parse_dates=["Date"])
+    ois_df = _normalize_columns(ois_df)
+    if target_date is None:
+        target_date = ois_df["Date"].max().normalize()
+    elif isinstance(target_date, pd.Timestamp):
+        target_date = target_date.normalize()
+
+    ois_curve = _ois_curve_from_csv(ois_csv, target_date)
+    disc_curve = read_ois_discount_curve(ois_csv, target_date)
+
+    index_df = pd.read_csv(cdx_csv, parse_dates=["Date"])
+    index_df = _normalize_columns(index_df)
+    index_df = _coerce_tenor_column(index_df)
+    index_df = _standardize_index_columns(index_df)
+    index_slice = index_df[index_df["Date"].dt.normalize() == target_date].copy()
+    if index_slice.empty:
+        raise ValueError(f"No CDX rows found for date {target_date}.")
+    tenors = index_slice["tenor"].to_numpy(dtype=float)
+    spreads_bp = index_slice["index_spread"].to_numpy(dtype=float)
+    order = np.argsort(tenors)
+    tenors = tenors[order]
+    spreads = spreads_bp[order] / 10000.0
+    index_curve = build_index_curve(
+        tenors,
+        spreads,
+        recovery_rate,
+        payment_freq=payment_freq,
+        disc_curve=disc_curve,
+    )
+
+    cons_df = pd.read_csv(constituents_csv, parse_dates=["Date"])
+    cons_df = _normalize_columns(cons_df)
+    cons_slice = cons_df[cons_df["Date"].dt.normalize() == target_date].copy()
+    if cons_slice.empty:
+        raise ValueError(f"No constituents rows found for date {target_date}.")
+    tenor_cols = {5.0: "Spread_5Y", 7.0: "Spread_7Y", 10.0: "Spread_10Y"}
+    cons_tenors = []
+    cons_spreads = []
+    for tenor, col in tenor_cols.items():
+        if col not in cons_slice.columns:
+            raise ValueError(f"Missing {col} in constituents data.")
+        mean_bp = cons_slice[col].astype(float).mean()
+        cons_tenors.append(tenor)
+        cons_spreads.append(mean_bp / 10000.0)
+    cons_curve = build_index_curve(
+        cons_tenors,
+        cons_spreads,
+        recovery_rate,
+        payment_freq=payment_freq,
+        disc_curve=disc_curve,
+    )
+
+    t_max = max(
+        float(np.max(ois_curve.times)),
+        float(np.max(index_curve.times)),
+        float(np.max(cons_curve.times)),
+    )
+    ts = np.linspace(0.0, max(10.0, t_max), 200)
+
+    ois_vals = np.array([ois_curve.survival(t) for t in ts])
+    index_vals = np.array([index_curve.survival(t) for t in ts])
+    cons_vals = np.array([cons_curve.survival(t) for t in ts])
+
+    if output_path is None:
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_path = str(plots_dir / "discount_factors.png")
+    if output_table_path is None:
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_table_path = str(plots_dir / "discount_factors.csv")
+    if output_table_txt_path is None:
+        plots_dir = Path(__file__).resolve().parents[1] / "plots"
+        output_table_txt_path = str(plots_dir / "discount_factors_table.txt")
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(ts, ois_vals, label="OIS discount (hazard as rate)")
+    ax.plot(ts, index_vals, label="CDX index-implied DF")
+    ax.plot(ts, cons_vals, label="Constituent avg-implied DF")
+    ax.set_title(f"Discount Factor via survival(t) using data on {target_date.date()}")
+    ax.set_xlabel("t (years)")
+    ax.set_ylabel("discount_factor(t)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    if show_plot:
+        plt.show()
+    plt.close(fig)
+
+    if print_ascii:
+        width = 60
+        levels = " .:-=+*#%@" #???
+        idx = np.linspace(0, len(ts) - 1, 30, dtype=int)
+        print(f"ASCII plot (t in years) for {target_date.date()}:")
+        for label, series in [
+            ("OIS", ois_vals),
+            ("Index", index_vals),
+            ("Const", cons_vals),
+        ]:
+            values = series[idx]
+            scaled = (values - values.min()) / max(1e-12, values.max() - values.min())
+            chars = "".join(levels[int(x * (len(levels) - 1))] for x in scaled)
+            print(f"{label:>6}: {chars}")
+
+    table_ts = np.array([0.5, 1, 2, 3, 5, 7, 10], dtype=float)
+    table = pd.DataFrame(
+        {
+            "t_years": table_ts,
+            "ois_df": [_df_curve(ois_curve, float(t)) for t in table_ts],
+            "index_df": [_df_curve(index_curve, float(t)) for t in table_ts],
+            "constituent_df": [_df_curve(cons_curve, float(t)) for t in table_ts],
+        }
+    )
+    Path(output_table_path).parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(output_table_path, index=False)
+    Path(output_table_txt_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_table_txt_path, "w", encoding="utf-8") as fh:
+        fh.write(table.to_string(index=False))
+        fh.write("\n")
+    if print_table:
+        print(table.to_string(index=False))
+
+    return table

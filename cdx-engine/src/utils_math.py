@@ -14,7 +14,7 @@ def norm_cdf(x: float) -> float:
 def norm_ppf(x: float) -> float:
     return float(norm.ppf(x))
 
-
+# Does it make more sense by the equal weight?
 def hermite_nodes_weights(n_quad: int) -> Tuple[np.ndarray, np.ndarray]:
     nodes, weights = hermgauss(n_quad)
     scaled_nodes = np.sqrt(2.0) * nodes

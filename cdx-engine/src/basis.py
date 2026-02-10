@@ -48,6 +48,7 @@ def build_average_curve(constituent_curves: List[Curve]) -> Curve:
         hazards[i] = max(-np.log(q / prev_q) / dt, 1e-12)
         prev_t = float(t)
         prev_q = q
+    print(f"average hazard: {hazards}")
     return Curve(times=times, hazard=hazards)
 
 
@@ -56,8 +57,9 @@ def basis_adjust_curves_beta(
     index_curve: Curve,
     recovery: float,
     index_recovery: Optional[float] = None,
+    recoveries: Optional[np.ndarray] = None,
     beta_bounds: Tuple[float, float] = (0.0, 50.0),
-) -> Tuple[List[Curve], np.ndarray]:
+) -> Tuple[List[Curve], np.ndarray, Curve]:
     """
     Apply a beta scaling to constituent hazards so that average expected loss
     matches the index expected loss at each tenor:
@@ -68,6 +70,11 @@ def basis_adjust_curves_beta(
     - lambda_m is the piecewise-constant hazard at the tenor knot.
     - P'_m(t) uses a single beta per tenor; beta is applied to that tenor's hazard.
     - EL_index(t) is computed from the index curve: (1 - R_index) * (1 - Q_index(t)).
+
+    Returns:
+    - adjusted_curves: list of adjusted constituent curves
+    - betas: beta(t) array
+    - adjusted_index_curve: average survival curve of adjusted constituents
     """
     if recovery < 0 or recovery >= 1:
         raise ValueError("recovery must be in [0, 1)")
@@ -79,6 +86,12 @@ def basis_adjust_curves_beta(
     times = _validate_curve_grid(constituent_curves, index_curve)
     n_names = len(constituent_curves)
     lambdas = np.vstack([curve.hazard for curve in constituent_curves])
+    if recoveries is None:
+        recoveries_arr = np.full(n_names, recovery, dtype=float)
+    else:
+        recoveries_arr = np.asarray(recoveries, dtype=float)
+        if recoveries_arr.shape != (n_names,):
+            raise ValueError("recoveries must have shape (n_names,)")
     betas = np.zeros_like(times, dtype=float)
     target_survival = np.ones((n_names, times.size), dtype=float)
 
@@ -86,30 +99,48 @@ def basis_adjust_curves_beta(
     if lo < 0 or hi <= 0 or hi <= lo:
         raise ValueError("beta_bounds must be positive and increasing")
 
+    class _Objective:
+        def __init__(self) -> None:
+            self.lam: np.ndarray | None = None
+            self.t: float = 0.0
+            self.target_el: float = 0.0
+            self.recoveries: np.ndarray | None = None
+
+        def update(self, lam: np.ndarray, t: float, target_el: float, recoveries: np.ndarray) -> None:
+            self.lam = lam
+            self.t = t
+            self.target_el = target_el
+            self.recoveries = recoveries
+
+        def __call__(self, beta: float) -> float:
+            lam = self.lam
+            if lam is None or self.recoveries is None:
+                return 0.0
+            surv = np.exp(-beta * lam * self.t)
+            avg_el = np.mean((1.0 - self.recoveries) * (1.0 - surv))
+            return avg_el - self.target_el
+
+    objective = _Objective()
+
     for idx, t in enumerate(times):
         t = float(t)
         if t <= 0:
             betas[idx] = 0.0
-            adjusted_hazards[:, idx] = 0.0
             continue
 
-        target_el = (1.0 - index_recovery) * index_curve.default_prob(t)
+        target_el = (1.0 - index_recovery) * index_curve.default_prob(t) 
         if target_el <= 0:
             betas[idx] = 0.0
-            adjusted_hazards[:, idx] = 0.0
             continue
 
         lam = np.maximum(lambdas[:, idx], 0.0)
-        max_el = np.mean((1.0 - recovery) * (lam > 0).astype(float))
+        max_el = np.mean((1.0 - recoveries_arr) * (lam > 0).astype(float))
         if target_el > max_el + 1e-10:
             raise ValueError(
                 f"Target EL {target_el:.6g} exceeds max achievable {max_el:.6g} at t={t:.4g}."
             )
 
-        def objective(beta: float) -> float:
-            surv = np.exp(-beta * lam * t)
-            avg_el = np.mean((1.0 - recovery) * (1.0 - surv))
-            return avg_el - target_el
+        objective.update(lam, t, target_el, recoveries_arr)
 
         f_lo = objective(lo)
         f_hi = objective(hi)
@@ -141,4 +172,5 @@ def basis_adjust_curves_beta(
         prev_q = q
 
     adjusted_curves = [Curve(times=times, hazard=adjusted_hazards[i]) for i in range(n_names)]
-    return adjusted_curves, betas
+    adjusted_index_curve = build_average_curve(adjusted_curves)
+    return adjusted_curves, betas, adjusted_index_curve

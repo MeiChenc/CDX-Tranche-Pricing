@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple
 
+import logging
 import numpy as np
 
 from .copula_lhp import conditional_loss
@@ -19,9 +20,9 @@ class TranchePV:
     def pv(self) -> float:
         return self.protection_leg - self.premium_leg
 
-
+#EL 
 def tranche_expected_loss(
-    qt: float,
+    q_survival: float,
     k1: float,
     k2: float,
     rho: float,
@@ -31,16 +32,36 @@ def tranche_expected_loss(
     nodes, weights = hermite_nodes_weights(n_quad)
     losses = []
     for m in nodes:
-        loss = conditional_loss(qt, rho, m, recovery)
+        loss = conditional_loss(q_survival, rho, m, recovery)  #Protection leg
         tranche_loss = np.minimum(np.maximum(loss - k1, 0.0), k2 - k1)
         losses.append(tranche_loss)
     return float(np.sum(weights * np.asarray(losses)))
 
 
-def _discount_factor(disc_curve: Optional[Curve], t: float) -> float:
+def _discount_factor(disc_curve: Optional[Curve | Callable[[float], float]], t: float) -> float:
     if disc_curve is None:
         return 1.0
-    return disc_curve.survival(t)
+    if isinstance(disc_curve, Curve):
+        times = np.asarray(disc_curve.times, dtype=float)
+        rates = np.asarray(disc_curve.hazard, dtype=float)
+        r = np.interp(t, times, rates, left=rates[0], right=rates[-1])
+        return float(np.exp(-r * t))
+    return float(disc_curve(t))
+
+def generate_base_el(
+    tenor: float,
+    k1: float,
+    k2: float,
+    rho: float,
+    curve: Curve,
+    recovery: float,
+    n_quad: int = 64,
+    payment_freq: int = 4,
+) -> float:   
+    times = np.linspace(0.0, tenor, int(tenor * payment_freq) + 1)[1:]
+    losses = [tranche_expected_loss(curve.survival(t), k1, k2, rho, recovery, n_quad) for t in times]
+    logging.info("Tranche expected losses for tenor %.2f [k1=%.2f,k2=%.2f]: %s", tenor, k1, k2, losses[-1])
+    return losses[-1]
 
 
 def price_tranche_lhp(
@@ -55,8 +76,8 @@ def price_tranche_lhp(
     disc_curve: Optional[Curve] = None,
 ) -> TranchePV:
     times = np.linspace(0.0, tenor, int(tenor * payment_freq) + 1)[1:]
-    losses = [tranche_expected_loss(curve.default_prob(t), k1, k2, rho, recovery, n_quad) for t in times]
-
+    losses = [tranche_expected_loss(curve.survival(t), k1, k2, rho, recovery, n_quad) for t in times]
+    # logging.info("Tranche expected losses for tenor %.2f [k1=%.2f,k2=%.2f]: %s", tenor, k1, k2, losses)
     premium_leg = 0.0
     protection_leg = 0.0
     prev_loss = 0.0
@@ -71,7 +92,7 @@ def price_tranche_lhp(
     return TranchePV(premium_leg=premium_leg, protection_leg=protection_leg)
 
 
-def price_tranche_from_curve(
+def price_tranche_from_curve( #which default prob should we use ? P(t) or P_m(t)
     tenors: Iterable[float],
     k1: float,
     k2: float,
@@ -83,6 +104,6 @@ def price_tranche_from_curve(
 ) -> Tuple[np.ndarray, np.ndarray]:
     tenors = np.asarray(list(tenors), dtype=float)
     expected_losses = np.array(
-        [tranche_expected_loss(curve.default_prob(t), k1, k2, rho, recovery, n_quad) for t in tenors]
+        [tranche_expected_loss(curve.survival(t), k1, k2, rho, recovery, n_quad) for t in tenors]
     )
     return tenors, expected_losses
