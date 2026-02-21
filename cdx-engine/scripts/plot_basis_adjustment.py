@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.basis_adjustment_utils import build_basis_adjustment_bundle
-from src.curves import Curve
+from src.curves import Curve, build_index_curve
 from src.io_data import read_ois_discount_curve
 
 
@@ -260,10 +260,13 @@ def main() -> None:
     disc_curve = read_ois_discount_curve(ROOT / "data" / "ois_timeseries.csv", target_date)
 
     index_snapshot = _load_index_snapshot(target_date)
+    index_snapshot_mid = index_snapshot[["tenor", "Index_Mid"]].copy()
     cons_df = pd.read_csv(ROOT / "data" / "constituents_timeseries.csv", parse_dates=["Date"])
     index_curve_full, adjusted_avg_curve, all_tenors, betas, expanded_curves, recoveries = (
-        build_basis_adjustment_bundle(target_date, index_snapshot, cons_df, disc_curve, recovery_index=0.4)
+        build_basis_adjustment_bundle(target_date, index_snapshot_mid, cons_df, disc_curve, recovery_index=0.4)
     )
+    mid_spreads = index_snapshot_mid["Index_Mid"].to_numpy(dtype=float) / 10000.0
+    mid_curve_before = build_index_curve(all_tenors, mid_spreads, recovery=0.4, disc_curve=disc_curve)
 
     if adjusted_avg_curve is None or expanded_curves == []:
         logging.warning("Basis adjustment skipped; using index curve only.")
@@ -305,6 +308,23 @@ def main() -> None:
         ax2.grid(True, alpha=0.3)
         fig2.tight_layout()
         fig2.savefig(outdir / f"basis_beta_{target_date}.png", dpi=200)
+
+    cum_hazard_before = -np.log(
+        np.maximum(np.array([mid_curve_before.survival(float(t)) for t in all_tenors], dtype=float), 1e-12)
+    )
+    cum_hazard_after = -np.log(
+        np.maximum(np.array([adjusted_avg_curve.survival(float(t)) for t in all_tenors], dtype=float), 1e-12)
+    )
+    fig3, ax3 = plt.subplots(figsize=(9, 5))
+    ax3.plot(all_tenors, cum_hazard_before, marker="o", label="Before Basis Adj (Index_Mid)")
+    ax3.plot(all_tenors, cum_hazard_after, marker="s", linestyle="--", label="After Basis Adj")
+    ax3.set_title("Cumulative Hazard: Before vs After Basis Adjustment")
+    ax3.set_xlabel("Tenor (Years)")
+    ax3.set_ylabel("Cumulative Hazard H(t)")
+    ax3.grid(True, alpha=0.3)
+    ax3.legend()
+    fig3.tight_layout()
+    fig3.savefig(outdir / f"cum_hazard_compare_mid_basisadj_{target_date}.png", dpi=200)
 
     logging.info("Saved plots to %s for date %s", outdir, target_date)
 

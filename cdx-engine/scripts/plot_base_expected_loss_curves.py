@@ -5,7 +5,7 @@ import logging
 import sys
 from datetime import date as date_type
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.basis_adjustment_utils import build_basis_adjusted_curve
+from src.basis_adjustment_utils import build_index_dual_curve_beta_bundle
 from src.calibration_basecorr_relaxed import calibrate_basecorr_relaxed
-from src.curves import Curve, build_index_curve
+from src.curves import Curve
 from src.io_data import read_ois_discount_curve
 from src.pricer_tranche import price_tranche_lhp, generate_base_el
 
@@ -83,18 +83,28 @@ def _round_tenor(value: float, ndigits: int = 6) -> float:
     return float(round(float(value), ndigits))
 
 
-def _build_index_curve(snapshot: pd.DataFrame, disc_curve) -> Curve:
-    tenors = snapshot["tenor"].to_numpy(dtype=float)
-    index_spreads = snapshot["Index_Mid"].to_numpy(dtype=float) / 10000.0
-    logging.info("DEBUG: First 5 spreads: %s", index_spreads[:5])
-    logging.info("DEBUG: First 5 tenors: %s", tenors[:5])
-    curve = build_index_curve(tenors, index_spreads, recovery=0.4, disc_curve=disc_curve)
-    logging.info("DEBUG: Index lambdas by tenor: %s", dict(zip(tenors, curve.hazard)))
-    surv = {float(t): curve.survival(float(t)) for t in tenors}
-    dprob = {float(t): curve.default_prob(float(t)) for t in tenors}
-    logging.info("DEBUG: Index survival by tenor: %s", surv)
-    logging.info("DEBUG: Index default prob by tenor: %s", dprob)
-    return curve
+def _curve_from_cum_hazard(tenors: np.ndarray, cum_hazard: np.ndarray) -> Curve:
+    tenors = np.asarray(tenors, dtype=float)
+    cum_hazard = np.asarray(cum_hazard, dtype=float)
+    if tenors.ndim != 1 or cum_hazard.ndim != 1 or tenors.size != cum_hazard.size:
+        raise ValueError("tenors and cum_hazard must be 1D arrays with matching shape")
+    if tenors.size == 0:
+        raise ValueError("empty tenor grid")
+    if np.any(np.diff(tenors) <= 0):
+        raise ValueError("tenors must be strictly increasing")
+
+    lambdas = np.zeros_like(cum_hazard, dtype=float)
+    prev_t = 0.0
+    prev_h = 0.0
+    for i, (t, h) in enumerate(zip(tenors, cum_hazard)):
+        dt = float(t) - prev_t
+        if dt <= 0:
+            raise ValueError("tenors must be strictly increasing")
+        dh = max(float(h) - prev_h, 0.0)
+        lambdas[i] = max(dh / dt, 1e-12)
+        prev_t = float(t)
+        prev_h = float(h)
+    return Curve(times=tenors, hazard=lambdas)
 
 
 def _row_quotes(row: pd.Series) -> tuple[Dict[float, float], Dict[float, float], List[float]]:
@@ -216,6 +226,49 @@ def _cubic_spline_interpolate(x: np.ndarray, y: np.ndarray, x_new: np.ndarray) -
     return np.asarray(spline(x_new), dtype=float)
 
 
+def _model_legs_from_basecorr(
+    tenor: float,
+    k1: float,
+    k2: float,
+    rho_k2: float,
+    rho_k1: float | None,
+    curve: Curve,
+    recovery: float,
+    n_quad: int,
+    payment_freq: int,
+    disc_curve,
+) -> Tuple[float, float]:
+    pv_k2 = price_tranche_lhp(
+        tenor,
+        0.0,
+        k2,
+        rho_k2,
+        curve,
+        recovery,
+        n_quad=n_quad,
+        payment_freq=payment_freq,
+        disc_curve=disc_curve,
+    )
+    if k1 <= 0.0:
+        return float(pv_k2.protection_leg), float(pv_k2.premium_leg)
+    if rho_k1 is None:
+        raise ValueError("rho_k1 is required when k1 > 0")
+    pv_k1 = price_tranche_lhp(
+        tenor,
+        0.0,
+        k1,
+        rho_k1,
+        curve,
+        recovery,
+        n_quad=n_quad,
+        payment_freq=payment_freq,
+        disc_curve=disc_curve,
+    )
+    model_prot = float(pv_k2.protection_leg - pv_k1.protection_leg)
+    model_prem = float(pv_k2.premium_leg - pv_k1.premium_leg)
+    return model_prot, model_prem
+
+
 
 
 
@@ -232,6 +285,7 @@ def main() -> None:
 
     numeric_cols = [
         "Index_Mid",
+        "Index_0_100_Spread",
         "Equity_0_3_Spread",
         "Equity_0_3_Upfront",
         "Mezz_3_7_Spread",
@@ -268,12 +322,21 @@ def main() -> None:
         snapshot = valid[valid["Date"].dt.date == target_date].copy()
 
     disc_curve = read_ois_discount_curve(str(ROOT / "data" / "ois_timeseries.csv"), target_date)
-    cons_df = pd.read_csv(ROOT / "data" / "constituents_timeseries.csv", parse_dates=["Date"])
-    adjusted_curve = build_basis_adjusted_curve(target_date, snapshot, cons_df, disc_curve)
-    curves = {
-        "Index": _build_index_curve(snapshot, disc_curve),
-        "Adjusted": adjusted_curve,
-    }
+    tenors_beta, theoretical_curve, _, beta_knot, beta_cum, _, _ = build_index_dual_curve_beta_bundle(
+        snapshot,
+        disc_curve=disc_curve,
+        recovery_index=0.4,
+        theoretical_col="Index_0_100_Spread",
+        market_col="Index_Mid",
+    )
+    theo_H = -np.log(np.maximum(np.array([theoretical_curve.survival(float(t)) for t in tenors_beta]), 1e-12))
+    adjusted_H = beta_cum * theo_H
+    adjusted_curve = _curve_from_cum_hazard(tenors_beta, adjusted_H)
+    logging.info("Using beta_cum-adjusted curve for 'Adjusted' run.")
+    logging.info("DEBUG: beta_knot by tenor: %s", dict(zip(tenors_beta, beta_knot)))
+    logging.info("DEBUG: beta_cum by tenor: %s", dict(zip(tenors_beta, beta_cum)))
+    label = "Adjusted"
+    curve = adjusted_curve
 
     tenors_available = snapshot["tenor"].to_numpy(dtype=float)
     tenors_plot = _parse_tenors(args.tenors, tenors_available)
@@ -281,81 +344,140 @@ def main() -> None:
     outdir = ROOT / args.outdir
     outdir.mkdir(parents=True, exist_ok=True)
 
-    for label, curve in curves.items():
-        fig_base, ax_base = plt.subplots(figsize=(9, 5))
-        monotonic_flags = {
-        }
+    fig_base, ax_base = plt.subplots(figsize=(9, 5))
+    monotonic_flags = {
+    }
+    residual_rows: List[dict] = []
 
-        for tenor in tenors_plot:
-            row = snapshot.loc[snapshot["tenor"] == tenor]
-            if row.empty:
-                logging.warning("Tenor %.2f not found for date %s; skipping.", tenor, target_date)
-                continue
-            row = row.iloc[0]
+    for tenor in tenors_plot:
+        row = snapshot.loc[snapshot["tenor"] == tenor]
+        if row.empty:
+            logging.warning("Tenor %.2f not found for date %s; skipping.", tenor, target_date)
+            continue
+        row = row.iloc[0]
 
-            tranche_spreads, tranche_upfronts, dets = _row_quotes(row)
-            logging.info("Using coarse grid basecorr fit (grid_size=%d, n_quad=%d).", args.grid_size, args.n_quad)
-            basecorr = calibrate_basecorr_relaxed(
-                tenor,
-                dets,
-                tranche_spreads,
-                tranche_upfronts,
-                curve,
+        tranche_spreads, tranche_upfronts, dets = _row_quotes(row)
+        logging.info("Using coarse grid basecorr fit (grid_size=%d, n_quad=%d).", args.grid_size, args.n_quad)
+        basecorr = calibrate_basecorr_relaxed(
+            tenor,
+            dets,
+            tranche_spreads,
+            tranche_upfronts,
+            curve,
+            recovery=0.4,
+            grid_size=args.grid_size,
+            n_quad=args.n_quad,
+            payment_freq=args.payment_freq,
+            disc_curve=disc_curve,
+        )
+        logging.info(
+            "Tenor %.2f basecorr: %s | Spread:%s | Upfront:%s",
+            tenor,
+            {d: basecorr.get(d, np.nan) for d in dets},
+            tranche_spreads,
+            tranche_upfronts,
+        )
+        for idx_det, det in enumerate(dets):
+            rho = float(basecorr.get(det, np.nan))
+            k1 = 0.0 if idx_det == 0 else dets[idx_det - 1]
+            k2 = det
+            rho_k1 = None if idx_det == 0 else float(basecorr.get(k1, np.nan))
+            spread = float(tranche_spreads.get(det, 0.0))
+            upfront = float(tranche_upfronts.get(det, 0.0))
+            model_prot, model_prem = _model_legs_from_basecorr(
+                tenor=tenor,
+                k1=k1,
+                k2=k2,
+                rho_k2=rho,
+                rho_k1=rho_k1,
+                curve=curve,
                 recovery=0.4,
-                grid_size=args.grid_size,
                 n_quad=args.n_quad,
                 payment_freq=args.payment_freq,
                 disc_curve=disc_curve,
             )
+            residual = model_prot - spread * model_prem - upfront * (k2 - k1)
             logging.info(
-                "Tenor %.2f basecorr: %s | Spread:%s | Upfront:%s",
+                "%s legs tenor %.2f [%.2f, %.2f]: rho=%.6f prot=%.10f prem=%.10f spread_mkt=%.6f upfront=%.6f residual=%.10f",
+                label,
                 tenor,
-                {d: basecorr.get(d, np.nan) for d in dets},
-                tranche_spreads,
-                tranche_upfronts,
+                k1,
+                k2,
+                rho,
+                model_prot,
+                model_prem,
+                spread,
+                upfront,
+                residual,
+            )
+            residual_rows.append(
+                {
+                    "date": str(target_date),
+                    "curve_label": label,
+                    "tenor": float(tenor),
+                    "k1": k1,
+                    "k2": k2,
+                    "rho": rho,
+                    "spread_running": spread,
+                    "upfront": upfront,
+                    "model_protection_leg": model_prot,
+                    "model_premium_leg": model_prem,
+                    "residual": residual,
+                }
             )
 
-            dets_plot = [0.0] + dets
-            base_els = [0.0]
-            for det in dets:
-                # base_el(0, k2;rho)
-                rho = basecorr[det]
-                base_el = generate_base_el(
-                    tenor,
-                    0.0, # k1
-                    det, # k2
-                    rho,
-                    curve,
-                    recovery=0.4,
-                    n_quad=args.n_quad,
-                    payment_freq=args.payment_freq,
-                )
-                base_els.append(base_el)
-
-            base_els_arr = np.array(base_els, dtype=float)
-            is_monotonic =  _monotonic_non_decreasing(base_els_arr)
-            monotonic_flags[float(tenor)] = is_monotonic
-
-            series_label = f"{tenor:.1f}Y ({'mono' if is_monotonic else 'non-mono'})"
-            ax_base.plot(dets_plot, base_els, marker="o", label=series_label)
-
-        # Base EL
-        ax_base.set_title(f"Base Expected Loss Curves ({label} curve)")
-        ax_base.set_xlabel("Detachment")
-        ax_base.set_ylabel("Base Expected Loss")
-        ax_base.grid(True, alpha=0.3)
-        ax_base.legend()
-
-        fname = outdir / f"base_expected_loss_curves_{label.lower()}_{target_date}.png"
-        fig_base.tight_layout()
-        fig_base.savefig(fname, dpi=150)
-        logging.info("Saved plot to %s", fname)
-
-        if monotonic_flags:
-            summary = ", ".join(
-                f"{tenor:.1f}Y={('OK' if flag else 'FAIL')}" for tenor, flag in sorted(monotonic_flags.items())
+        dets_plot = [0.0] + dets
+        base_els = [0.0]
+        for det in dets:
+            rho = basecorr[det]
+            base_el = generate_base_el(
+                tenor,
+                0.0,
+                det,
+                rho,
+                curve,
+                recovery=0.4,
+                n_quad=args.n_quad,
+                payment_freq=args.payment_freq,
             )
-            logging.info("%s monotonicity check: %s", label, summary)
+            base_els.append(base_el)
+
+        base_els_arr = np.array(base_els, dtype=float)
+        is_monotonic = _monotonic_non_decreasing(base_els_arr)
+        monotonic_flags[float(tenor)] = is_monotonic
+
+        series_label = f"{tenor:.1f}Y ({'mono' if is_monotonic else 'non-mono'})"
+        ax_base.plot(dets_plot, base_els, marker="o", label=series_label)
+
+    ax_base.set_title(f"Base Expected Loss Curves ({label} curve)")
+    ax_base.set_xlabel("Detachment")
+    ax_base.set_ylabel("Base Expected Loss")
+    ax_base.grid(True, alpha=0.3)
+    ax_base.legend()
+
+    fname = outdir / f"base_expected_loss_curves_{label.lower()}_{target_date}.png"
+    fig_base.tight_layout()
+    fig_base.savefig(fname, dpi=150)
+    logging.info("Saved plot to %s", fname)
+
+    residual_df = pd.DataFrame(residual_rows)
+    residual_path = outdir / f"basecorr_residuals_{label.lower()}_{target_date}.csv"
+    residual_df.to_csv(residual_path, index=False)
+    if not residual_df.empty:
+        abs_res = np.abs(residual_df["residual"].to_numpy(dtype=float))
+        logging.info(
+            "%s residual summary | mean_abs=%.6e max_abs=%.6e",
+            label,
+            float(np.mean(abs_res)),
+            float(np.max(abs_res)),
+        )
+    logging.info("Saved residual diagnostics to %s", residual_path)
+
+    if monotonic_flags:
+        summary = ", ".join(
+            f"{tenor:.1f}Y={('OK' if flag else 'FAIL')}" for tenor, flag in sorted(monotonic_flags.items())
+        )
+        logging.info("%s monotonicity check: %s", label, summary)
 
 
 if __name__ == "__main__":

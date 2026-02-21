@@ -19,13 +19,15 @@ def calibrate_basecorr_relaxed(
     grid_size: int,
     payment_freq: int,
     disc_curve=None,
-) -> Dict[float, float]:
+    return_status: bool = False,
+):
     """
     Coarse grid base correlation calibration by minimizing absolute PV error.
     Uses base correlation convention:
         PV(K1,K2) = PV(0,K2; rho(K2)) - PV(0,K1; rho(K1))
     """
     calibrated: Dict[float, float] = {}
+    statuses: Dict[float, str] = {}
     dets = sorted(dets)
     prev_k = 0.0
     prev_base_pv = None
@@ -91,7 +93,7 @@ def calibrate_basecorr_relaxed(
             else:
                 model_prot = base_pv_k2.protection_leg - base_pv_k1.protection_leg
                 model_prem = base_pv_k2.premium_leg - base_pv_k1.premium_leg
-            return model_prot - spread * model_prem - upfront * tranche_width
+            return model_prot - spread * model_prem #- upfront * tranche_width
 
         rho_best, status = solve_rho_for_tranche(
             objective,
@@ -100,6 +102,7 @@ def calibrate_basecorr_relaxed(
             hi=0.999,
         )
         calibrated[k2] = rho_best
+        statuses[k2] = status
         prev_k = k2
         prev_base_pv = price_tranche_lhp(
             tenor,
@@ -112,4 +115,6 @@ def calibrate_basecorr_relaxed(
             payment_freq=payment_freq,
             disc_curve=disc_curve,
         )
+    if return_status:
+        return calibrated, statuses
     return calibrated

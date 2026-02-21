@@ -9,9 +9,9 @@ from scipy.optimize import brentq
 @dataclass
 class Curve:
     times: np.ndarray
-    hazard: np.ndarray
+    hazard: np.ndarray # it can be ois rate
 
-    def survival(self, t: float) -> float: #is it the 
+    def survival(self, t: float) -> float: 
         times = np.asarray(self.times)
         hazard = np.asarray(self.hazard)
         if t <= times[0]:
@@ -48,7 +48,7 @@ def bootstrap_from_spreads(tenors: Iterable[float], spreads: Iterable[float], re
     hazard = np.maximum(spreads / max(1e-12, (1.0 - recovery)), 1e-12)
     return Curve(times=tenors, hazard=hazard)
 
-
+# the hazard is ois rate here
 def _discount_factor(disc_curve: Optional[Callable[[float], float] | Curve], t: float) -> float:
     if disc_curve is None:
         return 1.0

@@ -20,7 +20,7 @@ class TranchePV:
     def pv(self) -> float:
         return self.protection_leg - self.premium_leg
 
-# absolute expected loss (percentage loss for a tranche)
+# absolute expected loss (percentage % loss for a tranche)
 def tranche_expected_loss(
     q_survival: float,
     k1: float,
@@ -98,19 +98,40 @@ def price_tranche_lhp(
 ) -> TranchePV:
     times = np.linspace(0.0, tenor, int(tenor * payment_freq) + 1)[1:]
     losses = [tranche_expected_loss(curve.survival(t), k1, k2, rho, recovery, n_quad) for t in times]
-    # logging.info("Tranche expected losses for tenor %.2f [k1=%.2f,k2=%.2f]: %s", tenor, k1, k2, losses)
     premium_leg = 0.0
     protection_leg = 0.0
+    width = float(k2 - k1)
+    if width <= 0:
+        raise ValueError("k2 must be greater than k1")
+
+    prev_t = 0.0
     prev_loss = 0.0
-    dt = 1.0 / payment_freq
+    prev_df = _discount_factor(disc_curve, prev_t)
 
     for t, loss in zip(times, losses):
-        df = _discount_factor(disc_curve, t)
-        premium_leg += df * dt * (k2 - k1 - loss)
-        # current_remaining = (k2 - k1) - loss
-        # prev_remaining = (k2 - k1) - prev_loss
-        # premium_leg += df * dt * (current_remaining + prev_remaining) / 2.0
-        protection_leg += df * (loss - prev_loss)
+        t = float(t)
+        curr_loss = float(loss)
+        dt = t - prev_t
+        if dt <= 0:
+            raise ValueError("payment schedule must be strictly increasing")
+
+        curr_df = _discount_factor(disc_curve, t)
+        df_mid = 0.5 * (prev_df + curr_df)
+
+        out_prev = max(width - prev_loss, 0.0) #remain notional
+        out_curr = max(width - curr_loss, 0.0)
+        # dloss = max(curr_loss - prev_loss, 0.0) # Default betweeen payment
+        dloss = curr_loss - prev_loss
+
+        # Premium leg: trapezoid on outstanding notional + AoD half-period approximation.
+        premium_leg += 0.5 * (prev_df * out_prev + curr_df * out_curr) * dt 
+        premium_leg += df_mid * 0.5 * dt * dloss
+
+        # Protection leg: midpoint discounting against expected loss increment.
+        protection_leg += df_mid * dloss
+
+        prev_t = t
+        prev_df = curr_df
         prev_loss = loss
 
     return TranchePV(premium_leg=premium_leg, protection_leg=protection_leg, upfront=upfront)

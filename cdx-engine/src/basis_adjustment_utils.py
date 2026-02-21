@@ -55,6 +55,92 @@ def _get_index_spreads_decimal(index_snapshot: pd.DataFrame) -> np.ndarray:
     )
 
 
+def build_index_dual_curve_beta_bundle(
+    index_snapshot: pd.DataFrame,
+    disc_curve,
+    recovery_index: float = 0.4,
+    theoretical_col: str = "Index_0_100_Spread",
+    market_col: str = "Index_Mid",
+    eps: float = 1e-12,
+):
+    """
+    Build theoretical and market index curves from two spread columns and compute
+    beta term structures on a shared tenor grid.
+
+    Returns:
+    - tenors: shared tenor grid (years)
+    - theoretical_curve: index curve bootstrapped from `theoretical_col`
+    - market_curve: index curve bootstrapped from `market_col`
+    - beta_knot: lambda_mkt / lambda_theo at tenor knots
+    - beta_cum: H_mkt(t) / H_theo(t), with H(t) = -ln(Q(t))
+    - theoretical_spreads_decimal: theoretical spreads on grid (decimal)
+    - market_spreads_decimal: market spreads on grid (decimal)
+    """
+    if "tenor" not in index_snapshot.columns:
+        raise ValueError("index_snapshot must contain tenor column")
+    if theoretical_col not in index_snapshot.columns:
+        raise ValueError(f"Missing theoretical spread column: {theoretical_col}")
+    if market_col not in index_snapshot.columns:
+        raise ValueError(f"Missing market spread column: {market_col}")
+    if eps <= 0:
+        raise ValueError("eps must be positive")
+
+    work = index_snapshot.copy()
+    work["tenor"] = pd.to_numeric(work["tenor"], errors="coerce")
+    work[theoretical_col] = pd.to_numeric(work[theoretical_col], errors="coerce")
+    work[market_col] = pd.to_numeric(work[market_col], errors="coerce")
+    work = work.dropna(subset=["tenor", theoretical_col, market_col]).copy()
+    if work.empty:
+        raise ValueError(
+            f"No overlapping valid rows for columns tenor/{theoretical_col}/{market_col}."
+        )
+    if (work["tenor"] <= 0).any():
+        raise ValueError("Tenors must be strictly positive")
+
+    work = work.sort_values("tenor")
+    work = work.drop_duplicates(subset=["tenor"], keep="last")
+
+    tenors = work["tenor"].to_numpy(dtype=float)
+    if tenors.size < 1:
+        raise ValueError("Need at least one tenor to build curves")
+
+    theoretical_spreads_decimal = work[theoretical_col].to_numpy(dtype=float) / 10000.0
+    market_spreads_decimal = work[market_col].to_numpy(dtype=float) / 10000.0
+
+    theoretical_curve = build_index_curve(
+        tenors,
+        theoretical_spreads_decimal,
+        recovery=recovery_index,
+        disc_curve=disc_curve,
+    )
+    market_curve = build_index_curve(
+        tenors,
+        market_spreads_decimal,
+        recovery=recovery_index,
+        disc_curve=disc_curve,
+    )
+
+    theo_lambda = np.maximum(np.asarray(theoretical_curve.hazard, dtype=float), 0.0)
+    mkt_lambda = np.maximum(np.asarray(market_curve.hazard, dtype=float), 0.0)
+    beta_knot = mkt_lambda / np.maximum(theo_lambda, eps)
+
+    theo_surv = np.array([theoretical_curve.survival(float(t)) for t in tenors], dtype=float)
+    mkt_surv = np.array([market_curve.survival(float(t)) for t in tenors], dtype=float)
+    theo_H = -np.log(np.maximum(theo_surv, eps))
+    mkt_H = -np.log(np.maximum(mkt_surv, eps))
+    beta_cum = mkt_H / np.maximum(theo_H, eps)
+
+    return (
+        tenors,
+        theoretical_curve,
+        market_curve,
+        beta_knot,
+        beta_cum,
+        theoretical_spreads_decimal,
+        market_spreads_decimal,
+    )
+
+
 def _hazard_on_grid(curve: Curve, target_times: np.ndarray) -> np.ndarray:
     times = np.asarray(curve.times, dtype=float)
     hazard = np.asarray(curve.hazard, dtype=float)

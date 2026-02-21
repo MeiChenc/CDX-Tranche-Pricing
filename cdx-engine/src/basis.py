@@ -134,6 +134,7 @@ def basis_adjust_curves_beta(
             continue
 
         lam = np.maximum(lambdas[:, idx], 0.0)
+        print(f"[beta solve] t={t:.6g}, lambdas={lam}")
         max_el = np.mean((1.0 - recoveries_arr) * (lam > 0).astype(float))
         if target_el > max_el + 1e-10:
             raise ValueError(
