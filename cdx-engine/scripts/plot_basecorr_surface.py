@@ -26,6 +26,8 @@ from src.utils_math import hermite_nodes_weights
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Plot base correlation surface from CDX time series data.")
     parser.add_argument("--date", type=str, default=None, help="Date to plot (YYYY-MM-DD). Defaults to latest.")
+    parser.add_argument("--all-days", action="store_true", help="Run and plot surfaces for all valid dates.")
+    parser.add_argument("--max-days", type=int, default=0, help="Limit number of latest days when --all-days is used.")
     parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite nodes for pricing.")
     parser.add_argument("--grid-size", type=int, default=200, help="Grid size for bracketing search.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG/INFO/WARNING).")
@@ -134,54 +136,12 @@ def _model_legs_from_basecorr(
     return model_prot, model_prem
 
 
-def main() -> None:
-    args = _parse_args()
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
-
-    index_df = pd.read_csv("data/cdx_timeseries.csv", parse_dates=["Date"])
-    index_df["Tenor"] = index_df["Tenor"].astype(str).str.upper()
-    index_df["tenor"] = index_df["Tenor"].str.replace("Y", "", regex=False).astype(float)
-
-    numeric_cols = [
-        "Index_Mid",
-        "Index_0_100_Spread",
-        "Equity_0_3_Spread",
-        "Equity_0_3_Upfront",
-        "Mezz_3_7_Spread",
-        "Mezz_3_7_Upfront",
-        "Mezz_7_10_Spread",
-        "Senior_10_15_Spread",
-        "SuperSenior_15_100_Spread",
-    ]
-    _coerce_numeric(index_df, numeric_cols)
-
-    required_cols = [
-        "Equity_0_3_Spread",
-        "Mezz_3_7_Spread",
-        "Mezz_7_10_Spread",
-        "Senior_10_15_Spread",
-        "SuperSenior_15_100_Spread",
-    ]
-    if args.date:
-        target_date = pd.to_datetime(args.date).date()
-        snapshot = index_df[index_df["Date"].dt.date == target_date].copy()
-        if snapshot.empty:
-            raise SystemExit(f"No rows found for date {target_date}.")
-        missing = snapshot[required_cols].isna().any()
-        if missing.any():
-            missing_cols = missing[missing].index.tolist()
-            raise SystemExit(
-                f"Missing tranche quotes for date {target_date}: {missing_cols}. "
-                "Pick a date with complete quotes."
-            )
-    else:
-        # Choose the latest date with complete tranche quotes
-        valid = index_df.dropna(subset=required_cols)
-        if valid.empty:
-            raise SystemExit("No dates with complete tranche quotes found.")
-        target_date = valid["Date"].max().date()
-        snapshot = valid[valid["Date"].dt.date == target_date].copy()
-
+def _run_for_date(
+    snapshot: pd.DataFrame,
+    target_date: date_type,
+    args: argparse.Namespace,
+    outdir: Path,
+) -> None:
     disc_curve = read_ois_discount_curve("data/ois_timeseries.csv", target_date)
     tenors = snapshot["tenor"].to_numpy(dtype=float)
     spreads_0_100 = snapshot["Index_0_100_Spread"].to_numpy(dtype=float) / 10000.0
@@ -247,7 +207,9 @@ def main() -> None:
             )
 
             for i, det in enumerate(dets):
-                surface[i, j] = basecorr.get(det, np.nan)
+                status = solve_status.get(det, "UNKNOWN")
+                rho_val = float(basecorr.get(det, np.nan))
+                surface[i, j] = rho_val if status == "BRENT" else np.nan
             logging.info("%s tenor %.2f basecorr: %s", curve_label, tenor, {d: basecorr.get(d, np.nan) for d in dets})
             for idx_det, det in enumerate(dets):
                 rho = float(basecorr.get(det, np.nan))
@@ -302,11 +264,10 @@ def main() -> None:
                     }
                 )
 
-        # Drop tenors with missing calibrations to avoid NaN surfaces.
-        valid_cols = np.all(np.isfinite(surface), axis=0)
+        valid_cols = np.any(np.isfinite(surface), axis=0)
         tenors_plot = tenors_sorted[valid_cols]
-        surface_plot = surface[:, valid_cols]
-        logging.info("%s valid tenors for surface: %s", curve_label, tenors_plot.tolist())
+        surface_plot = np.ma.masked_invalid(surface[:, valid_cols])
+        logging.info("%s valid tenors for surface (available BRENT points): %s", curve_label, tenors_plot.tolist())
 
         T, D = np.meshgrid(tenors_plot, dets)
         fig = plt.figure(figsize=(10, 7))
@@ -319,9 +280,8 @@ def main() -> None:
         ax.set_zlabel("Base Correlation")
         fig.colorbar(surf, shrink=0.6, label="Base Correlation")
         plt.tight_layout()
+        fig.savefig(outdir / f"basecorr_surface_{curve_label.lower()}_{target_date}.png", dpi=180)
 
-    outdir = ROOT / args.outdir
-    outdir.mkdir(parents=True, exist_ok=True)
     residual_df = pd.DataFrame(residual_rows)
     residual_path = outdir / f"basecorr_surface_residuals_{target_date}.csv"
     residual_df.to_csv(residual_path, index=False)
@@ -335,6 +295,57 @@ def main() -> None:
             brent_ratio,
         )
     logging.info("Saved calibration residual diagnostics to %s", residual_path)
+
+
+def main() -> None:
+    args = _parse_args()
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(levelname)s: %(message)s")
+
+    index_df = pd.read_csv("data/cdx_timeseries.csv", parse_dates=["Date"])
+    index_df["Tenor"] = index_df["Tenor"].astype(str).str.upper()
+    index_df["tenor"] = index_df["Tenor"].str.replace("Y", "", regex=False).astype(float)
+
+    numeric_cols = [
+        "Index_Mid",
+        "Index_0_100_Spread",
+        "Equity_0_3_Spread",
+        "Equity_0_3_Upfront",
+        "Mezz_3_7_Spread",
+        "Mezz_3_7_Upfront",
+        "Mezz_7_10_Spread",
+        "Senior_10_15_Spread",
+        "SuperSenior_15_100_Spread",
+    ]
+    _coerce_numeric(index_df, numeric_cols)
+
+    required_cols = [
+        "Equity_0_3_Spread",
+        "Mezz_3_7_Spread",
+        "Mezz_7_10_Spread",
+        "Senior_10_15_Spread",
+        "SuperSenior_15_100_Spread",
+    ]
+    valid = index_df.dropna(subset=required_cols)
+    outdir = ROOT / args.outdir
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.all_days:
+        target_dates = sorted(valid["Date"].dt.date.unique().tolist())
+        if args.max_days and args.max_days > 0:
+            target_dates = target_dates[-args.max_days :]
+    else:
+        if args.date:
+            target_dates = [pd.to_datetime(args.date).date()]
+        else:
+            target_dates = [valid["Date"].max().date()]
+
+    for target_date in target_dates:
+        snapshot = valid[valid["Date"].dt.date == target_date].copy()
+        if snapshot.empty:
+            logging.warning("No rows found for date %s, skip.", target_date)
+            continue
+        _run_for_date(snapshot=snapshot, target_date=target_date, args=args, outdir=outdir)
+
     plt.show()
 
 
