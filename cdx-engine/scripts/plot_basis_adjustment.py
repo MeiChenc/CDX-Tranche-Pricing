@@ -26,7 +26,7 @@ def _parse_args() -> argparse.Namespace:
         description="Plot basis adjustment diagnostics (expected loss comparison + beta curve)."
     )
     parser.add_argument("--date", type=str, default=None, help="Date to plot (YYYY-MM-DD). Defaults to latest.")
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory for figures.")
+    parser.add_argument("--outdir", type=str, default="outputs/plot_basis_adjustment", help="Output directory for figures.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG/INFO/WARNING).")
     return parser.parse_args()
 
@@ -284,8 +284,11 @@ def main() -> None:
         [(1.0 - 0.4) * adjusted_avg_curve.default_prob(float(t)) for t in all_tenors], dtype=float
     )
 
-    outdir = Path(args.outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir = ROOT / args.outdir
+    data_dir = outdir / "data"
+    plot_dir = outdir / "plots"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     fig1, ax1 = plt.subplots(figsize=(9, 5))
     ax1.plot(all_tenors, index_el, marker="o", label="Index Expected Loss")
@@ -297,7 +300,7 @@ def main() -> None:
     ax1.grid(True, alpha=0.3)
     ax1.legend()
     fig1.tight_layout()
-    fig1.savefig(outdir / f"expected_loss_compare_{target_date}.png", dpi=200)
+    fig1.savefig(plot_dir / f"expected_loss_compare_{target_date}.png", dpi=200)
 
     if betas.size:
         fig2, ax2 = plt.subplots(figsize=(9, 5))
@@ -307,7 +310,7 @@ def main() -> None:
         ax2.set_ylabel("Beta")
         ax2.grid(True, alpha=0.3)
         fig2.tight_layout()
-        fig2.savefig(outdir / f"basis_beta_{target_date}.png", dpi=200)
+        fig2.savefig(plot_dir / f"basis_beta_{target_date}.png", dpi=200)
 
     cum_hazard_before = -np.log(
         np.maximum(np.array([mid_curve_before.survival(float(t)) for t in all_tenors], dtype=float), 1e-12)
@@ -324,9 +327,9 @@ def main() -> None:
     ax3.grid(True, alpha=0.3)
     ax3.legend()
     fig3.tight_layout()
-    fig3.savefig(outdir / f"cum_hazard_compare_mid_basisadj_{target_date}.png", dpi=200)
+    fig3.savefig(plot_dir / f"cum_hazard_compare_mid_basisadj_{target_date}.png", dpi=200)
 
-    logging.info("Saved plots to %s for date %s", outdir, target_date)
+    logging.info("Saved plots to %s for date %s", plot_dir, target_date)
 
 
 if __name__ == "__main__":

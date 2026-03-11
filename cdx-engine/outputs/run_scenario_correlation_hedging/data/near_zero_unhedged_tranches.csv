@@ -1,0 +1,5 @@
+tranche,hedge_method,scenario_vol_unhedged,scenario_vol_hedged,scenario_vol_reduction,residual_rmse,residual_mean_abs_pnl,worst_case_abs_residual,worst_case_scenario,hedge_w_T1,hedge_w_T2,hedge_w_T3,near_zero_unhedged_flag
+1Y|10-15,factor_match,0.0,0.0,,0.0,0.0,0.0,PC1_up_1sigma,0.0,0.0,0.0,True
+1Y|7-10,factor_match,4.925644010754675e-17,4.72077136334217e-17,0.04159306822928843,4.488958762511822e-17,3.706016110449447e-17,7.190566407538334e-17,PC2_up_PC3_up,6.448871375297736e-17,3.1997793016664963e-16,-8.892050261360418e-16,True
+1Y|10-15,scenario_opt,0.0,0.0,,0.0,0.0,0.0,PC1_up_1sigma,0.0,0.0,0.0,True
+1Y|7-10,scenario_opt,4.925644010754675e-17,4.642370322740982e-17,0.057509979892008345,4.404986419489708e-17,3.607180389197629e-17,6.093843776183336e-17,PC2_up_PC3_up,3.083361006692849e-16,6.93021442900045e-16,-1.596548159004667e-15,True

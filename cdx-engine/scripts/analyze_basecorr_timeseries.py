@@ -37,7 +37,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--run-pca", action="store_true", help="Run PCA on daily node surfaces.")
     parser.add_argument("--key-points", type=str, default="5:0.10,10:0.15,7:0.10", help="rho(t,k) tracking points.")
     parser.add_argument("--beta-tenors", type=str, default="1,5,10", help="beta(t) tracking tenors.")
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory.")
+    parser.add_argument("--outdir", type=str, default="outputs/analyze_basecorr_timeseries", help="Output directory.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level.")
     return parser.parse_args()
 
@@ -338,7 +338,10 @@ def main() -> None:
         raise SystemExit("No daily results were produced.")
 
     outdir = ROOT / args.outdir
-    outdir.mkdir(parents=True, exist_ok=True)
+    data_dir = outdir / "data"
+    plot_dir = outdir / "plots"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     daily_df = pd.DataFrame(daily_rows).sort_values("date")
     nodes_df = pd.DataFrame(node_rows).sort_values(["date", "tenor", "detachment"])
@@ -348,8 +351,8 @@ def main() -> None:
     if np.any(rho_tensor < -1e-12) or np.any(rho_tensor > 1.0 + 1e-12):
         raise SystemExit("rho out of [0,1] bounds after clipping/assembly.")
 
-    daily_path = outdir / "basecorr_daily_diagnostics.csv"
-    nodes_path = outdir / "basecorr_node_timeseries.csv"
+    daily_path = data_dir / "basecorr_daily_diagnostics.csv"
+    nodes_path = data_dir / "basecorr_node_timeseries.csv"
     daily_df.to_csv(daily_path, index=False)
     nodes_df.to_csv(nodes_path, index=False)
 
@@ -377,13 +380,13 @@ def main() -> None:
         fig.tight_layout()
         fig.savefig(outpath, dpi=180)
 
-    _plot_heatmap(mean_abs, "Mean |Δrho| across days", outdir / "heatmap_mean_abs_delta_rho.png")
-    _plot_heatmap(p95_abs, "P95 |Δrho| across days", outdir / "heatmap_p95_abs_delta_rho.png")
+    _plot_heatmap(mean_abs, "Mean |Δrho| across days", plot_dir / "heatmap_mean_abs_delta_rho.png")
+    _plot_heatmap(p95_abs, "P95 |Δrho| across days", plot_dir / "heatmap_p95_abs_delta_rho.png")
     pd.DataFrame(
         mean_abs,
         index=[f"{t}Y" for t in common_tenors],
         columns=[f"{int(k*100)}%" for k in dets],
-    ).to_csv(outdir / "basecorr_abs_delta_heatmap_matrix.csv")
+    ).to_csv(data_dir / "basecorr_abs_delta_heatmap_matrix.csv")
 
     # surface_move_stats.json
     move_stats = {
@@ -402,7 +405,7 @@ def main() -> None:
                 "median_abs_delta_rho": float(np.median(vals)),
                 "p95_abs_delta_rho": float(np.percentile(vals, 95)),
             }
-    with open(outdir / "surface_move_stats.json", "w", encoding="utf-8") as f:
+    with open(data_dir / "surface_move_stats.json", "w", encoding="utf-8") as f:
         json.dump(move_stats, f, indent=2)
 
     # PCA on daily surface moves
@@ -420,7 +423,7 @@ def main() -> None:
             **{f"pc{i+1}": scores[:, i] for i in range(n_comp)},
         }
     )
-    pca_scores.to_csv(outdir / "pc_scores_timeseries.csv", index=False)
+    pca_scores.to_csv(data_dir / "pc_scores_timeseries.csv", index=False)
 
     # Explained variance plot
     fig_var, ax_var = plt.subplots(figsize=(7, 4))
@@ -432,9 +435,16 @@ def main() -> None:
     ax_var.set_title("PCA Explained Variance (Surface Moves)")
     ax_var.grid(True, axis="y", alpha=0.3)
     fig_var.tight_layout()
-    fig_var.savefig(outdir / "pca_explained_variance.png", dpi=180)
+    fig_var.savefig(plot_dir / "pca_explained_variance.png", dpi=180)
+    pd.DataFrame(
+        {
+            "pc": np.arange(1, n_comp + 1, dtype=int),
+            "explained_variance_ratio": var_ratio[:n_comp],
+        }
+    ).to_csv(data_dir / "pca_explained_variance.csv", index=False)
 
     # Loading heatmaps (PC1..PC3)
+    combined_rows: list[dict] = []
     for i in range(n_comp):
         loading = Vt[i, :].reshape(len(common_tenors), len(dets))
         fig_l, ax_l = plt.subplots(figsize=(8, 6))
@@ -448,7 +458,37 @@ def main() -> None:
         ax_l.set_yticklabels([f"{int(t)}Y" if float(t).is_integer() else f"{t:.1f}Y" for t in common_tenors])
         fig_l.colorbar(im, ax=ax_l)
         fig_l.tight_layout()
-        fig_l.savefig(outdir / f"pc{i+1}_loadings_heatmap.png", dpi=180)
+        fig_l.savefig(plot_dir / f"pc{i+1}_loadings_heatmap.png", dpi=180)
+        plt.close(fig_l)
+
+        det_labels = [f"{int(k * 100)}%" for k in dets]
+        tenor_labels = [f"{int(t)}Y" if float(t).is_integer() else f"{t:.1f}Y" for t in common_tenors]
+        load_df = pd.DataFrame(loading, index=tenor_labels, columns=det_labels).reset_index()
+        load_df = load_df.rename(columns={"index": "Tenor"})
+        load_df.to_csv(data_dir / f"pc{i+1}_loadings_heatmap.csv", index=False)
+
+        for ti, tenor in enumerate(common_tenors):
+            for ki, det in enumerate(dets):
+                combined_rows.append(
+                    {
+                        "tenor": float(tenor),
+                        "detachment": float(det),
+                        f"pc{i+1}": float(loading[ti, ki]),
+                    }
+                )
+
+    if combined_rows:
+        pca_loadings_df = pd.DataFrame(combined_rows)
+        pca_loadings_df = (
+            pca_loadings_df.groupby(["tenor", "detachment"], as_index=False)
+            .first()
+            .fillna(0.0)
+        )
+        for col in ("pc1", "pc2", "pc3"):
+            if col not in pca_loadings_df.columns:
+                pca_loadings_df[col] = 0.0
+        pca_loadings_df = pca_loadings_df[["tenor", "detachment", "pc1", "pc2", "pc3"]]
+        pca_loadings_df.to_csv(data_dir / "pca_loadings.csv", index=False)
 
     # PC1 vs index spread change correlation (with p-value + simple regression summary)
     idx_spread = np.asarray(idx_spread_series, dtype=float)
@@ -466,7 +506,7 @@ def main() -> None:
         ss_res = float(np.sum((pc1 - pred) ** 2))
         ss_tot = float(np.sum((pc1 - np.mean(pc1)) ** 2))
         r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
-    with open(outdir / "pc1_vs_spreaddiff_corr.txt", "w", encoding="utf-8") as f:
+    with open(data_dir / "pc1_vs_spreaddiff_corr.txt", "w", encoding="utf-8") as f:
         f.write(f"n_obs={pc1.size}\n")
         f.write(f"pearson_corr={corr_val}\n")
         f.write(f"pearson_p_value={p_val}\n")

@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite quadrature nodes.")
     parser.add_argument("--grid-size", type=int, default=120, help="Calibration grid size.")
     parser.add_argument("--payment-freq", type=int, default=4, help="Premium payment frequency.")
-    parser.add_argument("--outdir", type=str, default="outputs/corr_sensitivity", help="Output directory.")
+    parser.add_argument("--outdir", type=str, default="outputs/run_node_correlation_sensitivity", help="Output directory.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level.")
     return parser.parse_args()
 

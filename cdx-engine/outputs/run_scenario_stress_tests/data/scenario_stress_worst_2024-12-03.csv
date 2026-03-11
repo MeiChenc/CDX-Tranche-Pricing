@@ -1,0 +1,13 @@
+tranche,scenario,pnl
+Equity_0_3,spread_parallel_tighten_20pct,-0.025440232087796714
+Mezz_3_7,spread_parallel_tighten_20pct,-0.016462498229834664
+Equity_0_3,corr_parallel_up_5pt,-0.0152603738972933
+Mezz_7_10,spread_parallel_tighten_20pct,-0.009689059570922365
+Senior_10_15,corr_smile_steepen,-0.009019050278652643
+Senior_10_15,spread_parallel_tighten_20pct,-0.006350338556799992
+Mezz_7_10,corr_smile_steepen,-0.004775542684220764
+Mezz_3_7,corr_parallel_up_5pt,-0.004474683139163695
+Mezz_3_7,corr_smile_steepen,-0.004376404249595435
+Mezz_7_10,corr_parallel_up_5pt,-0.0027261165712932148
+Senior_10_15,corr_parallel_up_5pt,-0.0015154706882971117
+Equity_0_3,corr_smile_steepen,0.005849642756545995

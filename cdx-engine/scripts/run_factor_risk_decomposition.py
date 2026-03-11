@@ -26,9 +26,9 @@ if str(ROOT) not in sys.path:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Factor risk decomposition for CDX tranche correlation risk.")
-    parser.add_argument("--sens-file", type=str, default="outputs/corr_sensitivity/node_level_sensitivities.csv")
-    parser.add_argument("--pca-dir", type=str, default="outputs")
-    parser.add_argument("--outdir", type=str, default="outputs/factor_risk")
+    parser.add_argument("--sens-file", type=str, default="outputs/run_node_correlation_sensitivity/data/node_level_sensitivities.csv")
+    parser.add_argument("--pca-dir", type=str, default="outputs/analyze_basecorr_timeseries/data")
+    parser.add_argument("--outdir", type=str, default="outputs/run_factor_risk_decomposition")
     parser.add_argument("--log-level", type=str, default="INFO")
     return parser.parse_args()
 
@@ -154,26 +154,17 @@ def load_pca_loadings(pca_dir: Path) -> tuple[pd.DataFrame, dict[str, float]]:
         out["node_key"] = [_node_key(t, k) for t, k in zip(out["tenor"], out["detachment"])]
         return out, {f"pc{i}": float(ev_ratio.get(f"pc{i}", 0.0)) for i in (1, 2, 3)}
 
-    # Graceful fallback: only PC1 loading CSV is available.
+    # Refuse partial heatmap loading inputs; PC1/PC2/PC3 must come from the same PCA object.
     if pc1_csv.exists() and (not pc2_csv.exists() or not pc3_csv.exists()):
-        l1 = _load_heatmap_loading_csv(pc1_csv, "pc1")
-        if l1.empty:
-            raise ValueError(f"{pc1_csv} is empty after parsing.")
-        l1["pc2"] = 0.0
-        l1["pc3"] = 0.0
-        l1["node_key"] = [_node_key(t, k) for t, k in zip(l1["tenor"], l1["detachment"])]
         missing = []
         if not pc2_csv.exists():
             missing.append(pc2_csv.name)
         if not pc3_csv.exists():
             missing.append(pc3_csv.name)
-        logging.warning(
-            "Missing PCA loading files (%s). Using PC1-only decomposition with PC2/PC3 loadings set to zero.",
-            ", ".join(missing),
+        raise FileNotFoundError(
+            f"Missing PCA loading files: {missing}. "
+            "Refusing to run PC1-only decomposition because it would invalidate factor risk results."
         )
-        return l1[["tenor", "detachment", "pc1", "pc2", "pc3", "node_key"]], {
-            f"pc{i}": float(ev_ratio.get(f"pc{i}", 0.0)) for i in (1, 2, 3)
-        }
 
     if not node_ts_csv.exists():
         raise FileNotFoundError(
@@ -319,6 +310,27 @@ def align_nodes(loadings_df: pd.DataFrame, sens_df: pd.DataFrame) -> tuple[pd.Da
     return load_aligned, sens_aligned
 
 
+def validate_pca_consistency(loadings_df: pd.DataFrame, ev_ratio: dict[str, float]) -> None:
+    """Validate consistency between explained variance and loading vectors."""
+    for pc in ("pc1", "pc2", "pc3"):
+        ev = float(ev_ratio.get(pc, 0.0))
+        std = float(loadings_df[pc].std())
+        maxabs = float(loadings_df[pc].abs().max())
+
+        if ev > 1e-3 and maxabs < 1e-10:
+            raise ValueError(
+                f"{pc.upper()} explained variance ratio is {ev:.6f}, "
+                f"but its loadings are numerically zero. "
+                "This indicates inconsistent PCA inputs or a loading file generation bug."
+            )
+        if ev > 1e-3 and std < 1e-12:
+            raise ValueError(
+                f"{pc.upper()} explained variance ratio is {ev:.6f}, "
+                f"but its loading standard deviation is near zero ({std:.3e}). "
+                "This indicates inconsistent PCA inputs or a loading file generation bug."
+            )
+
+
 def compute_factor_exposures(loadings_df: pd.DataFrame, sens_df: pd.DataFrame) -> pd.DataFrame:
     """Compute tranche exposures dP/dPC_i via node-level projection into PCA space."""
     merged = sens_df.merge(
@@ -346,7 +358,7 @@ def compute_factor_exposures(loadings_df: pd.DataFrame, sens_df: pd.DataFrame) -
 
 
 def compute_normalized_exposures(exposure_df: pd.DataFrame, explained_var: dict[str, float]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute normalized exposures, dominant factor labels, and variance-weighted contributions."""
+    """Compute absolute-normalized risk contributions and variance-weighted contributions."""
     out = exposure_df.copy()
     abs_sum = (
         out[["pc1_exposure", "pc2_exposure", "pc3_exposure"]]
@@ -355,9 +367,9 @@ def compute_normalized_exposures(exposure_df: pd.DataFrame, explained_var: dict[
         .replace(0.0, np.nan)
     )
 
-    out["pc1_normalized"] = out["pc1_exposure"] / abs_sum
-    out["pc2_normalized"] = out["pc2_exposure"] / abs_sum
-    out["pc3_normalized"] = out["pc3_exposure"] / abs_sum
+    out["pc1_normalized"] = out["pc1_exposure"].abs() / abs_sum
+    out["pc2_normalized"] = out["pc2_exposure"].abs() / abs_sum
+    out["pc3_normalized"] = out["pc3_exposure"].abs() / abs_sum
     out[["pc1_normalized", "pc2_normalized", "pc3_normalized"]] = out[
         ["pc1_normalized", "pc2_normalized", "pc3_normalized"]
     ].fillna(0.0)
@@ -430,27 +442,22 @@ def generate_factor_risk_plots(exposure_df: pd.DataFrame, contrib_df: pd.DataFra
     fig.savefig(plot_dir / "grouped_pc_exposure_by_tranche.png", dpi=300)
     plt.close(fig)
 
-    # 2) Stacked bar chart of normalized factor contributions.
+    # 2) Stacked bar chart of absolute-normalized factor contributions.
     fig, ax = plt.subplots(figsize=(12, 5), constrained_layout=True)
-    pos_base = np.zeros(len(plot_df))
-    neg_base = np.zeros(len(plot_df))
+    base = np.zeros(len(plot_df))
     for col, color, label in [
         ("pc1_normalized", "#1f77b4", "PC1"),
         ("pc2_normalized", "#ff7f0e", "PC2"),
         ("pc3_normalized", "#2ca02c", "PC3"),
     ]:
         vals = plot_df[col].to_numpy(dtype=float)
-        pos = np.where(vals > 0, vals, 0.0)
-        neg = np.where(vals < 0, vals, 0.0)
-        ax.bar(x, pos, bottom=pos_base, color=color, label=label)
-        ax.bar(x, neg, bottom=neg_base, color=color)
-        pos_base += pos
-        neg_base += neg
-    ax.axhline(0.0, color="black", linewidth=0.8)
+        ax.bar(x, vals, bottom=base, color=color, label=label)
+        base += vals
     ax.set_xticks(x)
     ax.set_xticklabels(plot_df["tranche_label"], rotation=45, ha="right")
-    ax.set_title("Normalized Factor Exposure by Tranche")
-    ax.set_ylabel("Normalized Exposure")
+    ax.set_title("Normalized Risk Contribution by Factor (Absolute)")
+    ax.set_ylabel("Absolute-Normalized Contribution")
+    ax.set_ylim(0.0, 1.02)
     ax.legend()
     fig.savefig(plot_dir / "stacked_normalized_factor_contributions.png", dpi=300)
     plt.close(fig)
@@ -563,21 +570,24 @@ def main() -> None:
     sens_file = ROOT / args.sens_file
     pca_dir = ROOT / args.pca_dir
     outdir = ROOT / args.outdir
+    data_dir = outdir / "data"
     plot_dir = outdir / "plots"
     outdir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
     plot_dir.mkdir(parents=True, exist_ok=True)
 
     loadings_df, ev_ratio = load_pca_loadings(pca_dir)
     sens_df = load_node_sensitivities(sens_file)
     loadings_df, sens_df = align_nodes(loadings_df, sens_df)
+    validate_pca_consistency(loadings_df, ev_ratio)
 
     exposures = compute_factor_exposures(loadings_df, sens_df)
     exposures, contrib = compute_normalized_exposures(exposures, ev_ratio)
     summary = _build_factor_summary(exposures)
 
-    exposures_path = outdir / "factor_exposures_by_tranche.csv"
-    contrib_path = outdir / "factor_contributions_by_tranche.csv"
-    summary_path = outdir / "factor_summary.csv"
+    exposures_path = data_dir / "factor_exposures_by_tranche.csv"
+    contrib_path = data_dir / "factor_contributions_by_tranche.csv"
+    summary_path = data_dir / "factor_summary.csv"
 
     exposures.to_csv(exposures_path, index=False)
     contrib.to_csv(contrib_path, index=False)

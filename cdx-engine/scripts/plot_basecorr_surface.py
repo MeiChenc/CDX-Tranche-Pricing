@@ -31,7 +31,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite nodes for pricing.")
     parser.add_argument("--grid-size", type=int, default=200, help="Grid size for bracketing search.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG/INFO/WARNING).")
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory for diagnostics.")
+    parser.add_argument("--outdir", type=str, default="outputs/plot_basecorr_surface", help="Output directory for diagnostics.")
     return parser.parse_args()
 
 
@@ -140,7 +140,8 @@ def _run_for_date(
     snapshot: pd.DataFrame,
     target_date: date_type,
     args: argparse.Namespace,
-    outdir: Path,
+    data_dir: Path,
+    plot_dir: Path,
 ) -> None:
     disc_curve = read_ois_discount_curve("data/ois_timeseries.csv", target_date)
     tenors = snapshot["tenor"].to_numpy(dtype=float)
@@ -280,10 +281,10 @@ def _run_for_date(
         ax.set_zlabel("Base Correlation")
         fig.colorbar(surf, shrink=0.6, label="Base Correlation")
         plt.tight_layout()
-        fig.savefig(outdir / f"basecorr_surface_{curve_label.lower()}_{target_date}.png", dpi=180)
+        fig.savefig(plot_dir / f"basecorr_surface_{curve_label.lower()}_{target_date}.png", dpi=180)
 
     residual_df = pd.DataFrame(residual_rows)
-    residual_path = outdir / f"basecorr_surface_residuals_{target_date}.csv"
+    residual_path = data_dir / f"basecorr_surface_residuals_{target_date}.csv"
     residual_df.to_csv(residual_path, index=False)
     if not residual_df.empty:
         abs_res = np.abs(residual_df["residual"].to_numpy(dtype=float))
@@ -327,7 +328,10 @@ def main() -> None:
     ]
     valid = index_df.dropna(subset=required_cols)
     outdir = ROOT / args.outdir
-    outdir.mkdir(parents=True, exist_ok=True)
+    data_dir = outdir / "data"
+    plot_dir = outdir / "plots"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     if args.all_days:
         target_dates = sorted(valid["Date"].dt.date.unique().tolist())
@@ -344,7 +348,7 @@ def main() -> None:
         if snapshot.empty:
             logging.warning("No rows found for date %s, skip.", target_date)
             continue
-        _run_for_date(snapshot=snapshot, target_date=target_date, args=args, outdir=outdir)
+        _run_for_date(snapshot=snapshot, target_date=target_date, args=args, data_dir=data_dir, plot_dir=plot_dir)
 
     plt.show()
 

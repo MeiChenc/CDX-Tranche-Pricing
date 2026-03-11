@@ -29,6 +29,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite nodes for pricing.")
     parser.add_argument("--grid-size", type=int, default=200, help="Grid size for rho solver.")
     parser.add_argument("--payment-freq", type=int, default=4, help="Premium payment frequency per year.")
+    parser.add_argument(
+        "--equity-upfront-convention",
+        type=str,
+        choices=["tranche", "portfolio"],
+        default="tranche",
+        help="Unit for 0-3% upfront comparison: tranche %% notional or portfolio %% notional.",
+    )
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level.")
     return parser.parse_args()
 
@@ -153,12 +160,26 @@ def _implied_upfront_pct(model_prot: float, model_prem: float, running_spread: f
     return 100.0 * float((model_prot - running_spread * model_prem) / width)
 
 
+def _implied_upfront_pct_portfolio(model_prot: float, model_prem: float, running_spread: float) -> float:
+    return 100.0 * float(model_prot - running_spread * model_prem)
+
+
 def _print_table(hide_tenor: float, rows: List[Tuple[str, float, float, float]]) -> None:
     print(f"--- Running Tenor LOOCV (Hiding {hide_tenor:.1f}Y) ---")
     print(f"{'Tranche':<8} | {'Mkt Price':>10} | {'Pred Price':>10} | {'Upfront(bp)':>11} | {'Diff':>8}")
     for label, mkt, pred, upfront_bp in rows:
         diff = pred - mkt
         print(f"{label:<8} | {mkt:>10.2f} | {pred:>10.2f} | {upfront_bp:>11.2f} | {diff:>8.2f}")
+
+
+def _debug_equity_legs(tag: str, running_spread: float, model_prot: float, model_prem: float, width: float) -> None:
+    print(f"\n[DEBUG equity] {tag}")
+    print("running spread =", running_spread)
+    print("model_prot     =", model_prot)
+    print("model_prem     =", model_prem)
+    print("prot - c*prem  =", model_prot - running_spread * model_prem)
+    if width > 0:
+        print("with /width    =", (model_prot - running_spread * model_prem) / width)
 
 
 def main() -> None:
@@ -220,6 +241,50 @@ def main() -> None:
     rho_hat = build_rho_surface(basecorr_by_tenor)
     rho_pred = {k: float(np.clip(rho_hat(hide_tenor, k), 1e-4, 0.999)) for k in dets}
     logging.info("Predicted rho at hidden tenor %.1fY: %s", hide_tenor, rho_pred)
+    logging.info("Equity upfront comparison convention: %s", args.equity_upfront_convention)
+
+    # In-sample repricing sanity check on hidden tenor itself:
+    # use hidden-tenor own quotes to calibrate rho, then map model legs back to quote.
+    spreads_is, upfronts_is, _ = _row_quotes(test_row)
+    basecorr_is = calibrate_basecorr_relaxed(
+        tenor=hide_tenor,
+        dets=dets,
+        tranche_spreads=spreads_is,
+        tranche_upfronts=upfronts_is,
+        curve=curve,
+        recovery=0.4,
+        n_quad=args.n_quad,
+        grid_size=args.grid_size,
+        payment_freq=args.payment_freq,
+        disc_curve=disc_curve,
+    )
+    rho_eq_is = float(basecorr_is[dets[0]])
+    model_prot_is, model_prem_is = _model_legs_from_basecorr(
+        tenor=hide_tenor,
+        k1=0.0,
+        k2=dets[0],
+        rho_k2=rho_eq_is,
+        rho_k1=None,
+        curve=curve,
+        recovery=0.4,
+        n_quad=args.n_quad,
+        payment_freq=args.payment_freq,
+        disc_curve=disc_curve,
+    )
+    width_eq = float(dets[0] - 0.0)
+    raw_eq_is = model_prot_is - spreads_is[dets[0]] * model_prem_is
+    print("\n--- In-sample hidden-tenor equity repricing sanity check ---")
+    print(f"tenor={hide_tenor:.1f}Y rho_0_3={rho_eq_is:.6f}")
+    print(f"market upfront (tranche %)={100.0 * upfronts_is[dets[0]]:.6f}")
+    print(f"model upfront (portfolio %)={100.0 * raw_eq_is:.6f}")
+    print(f"model upfront (tranche %)={(100.0 * raw_eq_is / width_eq):.6f}")
+    _debug_equity_legs(
+        tag="in-sample (hidden tenor own rho)",
+        running_spread=spreads_is[dets[0]],
+        model_prot=model_prot_is,
+        model_prem=model_prem_is,
+        width=width_eq,
+    )
 
     spreads_test, upfronts_test, _ = _row_quotes(test_row)
     table_rows: List[Tuple[str, float, float, float]] = []
@@ -241,10 +306,21 @@ def main() -> None:
         )
 
         # Keep a single displayed "price" unit:
-        # 0-3% as upfront points; others as running spread (bps), matching desk table style.
+        # 0-3% as upfront (chosen convention); others as running spread (bps).
         if i == 0:
-            mkt_price = 100.0 * upfronts_test[k2]
-            pred_price = _implied_upfront_pct(model_prot, model_prem, spreads_test[k2], k2 - k1)
+            _debug_equity_legs(
+                tag="LOOCV prediction",
+                running_spread=spreads_test[k2],
+                model_prot=model_prot,
+                model_prem=model_prem,
+                width=(k2 - k1),
+            )
+            if args.equity_upfront_convention == "portfolio":
+                mkt_price = 100.0 * upfronts_test[k2] * (k2 - k1)
+                pred_price = _implied_upfront_pct_portfolio(model_prot, model_prem, spreads_test[k2])
+            else:
+                mkt_price = 100.0 * upfronts_test[k2]
+                pred_price = _implied_upfront_pct(model_prot, model_prem, spreads_test[k2], k2 - k1)
         else:
             mkt_price = 10000.0 * spreads_test[k2]
             pred_price = _implied_spread_bps(model_prot, model_prem)

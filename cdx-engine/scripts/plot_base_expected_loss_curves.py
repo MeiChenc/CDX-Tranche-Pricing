@@ -45,7 +45,7 @@ def _parse_args() -> argparse.Namespace:
         default=4,
         help="Premium leg payment frequency per year (default 4).",
     )
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory for figures.")
+    parser.add_argument("--outdir", type=str, default="outputs/plot_base_expected_loss_curves", help="Output directory for figures.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level (DEBUG/INFO/WARNING).")
     return parser.parse_args()
 
@@ -342,7 +342,10 @@ def main() -> None:
     tenors_plot = _parse_tenors(args.tenors, tenors_available)
 
     outdir = ROOT / args.outdir
-    outdir.mkdir(parents=True, exist_ok=True)
+    data_dir = outdir / "data"
+    plot_dir = outdir / "plots"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     fig_base, ax_base = plt.subplots(figsize=(9, 5))
     monotonic_flags = {
@@ -446,6 +449,7 @@ def main() -> None:
         is_monotonic = _monotonic_non_decreasing(base_els_arr)
         monotonic_flags[float(tenor)] = is_monotonic
 
+
         series_label = f"{tenor:.1f}Y ({'mono' if is_monotonic else 'non-mono'})"
         ax_base.plot(dets_plot, base_els, marker="o", label=series_label)
 
@@ -455,13 +459,13 @@ def main() -> None:
     ax_base.grid(True, alpha=0.3)
     ax_base.legend()
 
-    fname = outdir / f"base_expected_loss_curves_{label.lower()}_{target_date}.png"
+    fname = plot_dir / f"base_expected_loss_curves_{label.lower()}_{target_date}.png"
     fig_base.tight_layout()
     fig_base.savefig(fname, dpi=150)
     logging.info("Saved plot to %s", fname)
 
     residual_df = pd.DataFrame(residual_rows)
-    residual_path = outdir / f"basecorr_residuals_{label.lower()}_{target_date}.csv"
+    residual_path = data_dir / f"basecorr_residuals_{label.lower()}_{target_date}.csv"
     residual_df.to_csv(residual_path, index=False)
     if not residual_df.empty:
         abs_res = np.abs(residual_df["residual"].to_numpy(dtype=float))
@@ -472,6 +476,7 @@ def main() -> None:
             float(np.max(abs_res)),
         )
     logging.info("Saved residual diagnostics to %s", residual_path)
+
 
     if monotonic_flags:
         summary = ", ".join(

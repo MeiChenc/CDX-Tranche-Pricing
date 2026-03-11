@@ -1,13 +1,13 @@
 # CDX Engine
 
-CDX tranche calibration and diagnostics toolkit with:
+CDX tranche pricing and correlation risk analytics engine with:
 
-- index/constituent curve bootstrapping,
-- basis adjustment (Mid-driven beta),
-- LHP tranche pricing,
-- base-correlation calibration,
-- surface/smile visualization,
-- multi-day diagnostics (heatmap + PCA on surface moves).
+- Gaussian copula LHP tranche pricing
+- hazard curve + basis adjustment diagnostics
+- base-correlation calibration and PCHIP interpolation
+- historical base-correlation PCA analytics
+- node-level and factor-level correlation risk
+- scenario-based correlation hedging diagnostics
 
 ## Environment
 
@@ -18,124 +18,165 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Data Inputs
+## Required Input Files
 
-Main input CSVs in `data/`:
+All must exist under `data/`:
 
 - `cdx_timeseries.csv`
-- `ois_timeseries.csv`
 - `constituents_timeseries.csv`
+- `ois_timeseries.csv`
 
-Core assumptions in current scripts:
+## Canonical Run Order (Core Pipeline)
 
-- spread columns are in bps and converted to decimal in code,
-- tranche running spread + upfront are used in calibration objective,
-- known bad day `11/24` is dropped in time-series analytics script.
+Run scripts in this exact order.
 
-## Core Scripts
-
-### 1) Basis Adjustment Diagnostics
+1. Data sanity check
 
 ```bash
-python scripts/plot_basis_adjustment.py --date 2024-12-03
+python3 scripts/run_daily.py
 ```
 
-Outputs:
-
-- `plots/expected_loss_compare_<date>.png`
-- `plots/basis_beta_<date>.png`
-- `plots/cum_hazard_compare_mid_basisadj_<date>.png`
-
-### 2) Base-Corr Surface (Raw Nodes, Pre-PCHIP)
-
-Single day:
+2. Basis-adjusted hazard diagnostics
 
 ```bash
-python scripts/plot_basecorr_surface.py --date 2024-12-03
+python3 scripts/plot_basis_adjustment.py --date 2024-12-03 --outdir outputs
 ```
 
-All valid days:
+3. Base-correlation node calibration snapshots
 
 ```bash
-python scripts/plot_basecorr_surface.py --all-days
+python3 scripts/plot_basecorr_surface.py --all-days --outdir outputs
 ```
 
-Latest N days:
+4. Continuous PCHIP smile/surface diagnostics
 
 ```bash
-python scripts/plot_basecorr_surface.py --all-days --max-days 8
+python3 scripts/plot_continuous_basecorr_pchip.py --date 2024-12-03 --outdir outputs --no-show
 ```
 
-Notes:
-
-- calibration uses **Basis_Adjusted** curve,
-- plotting keeps available `BRENT` points and masks non-BRENT nodes,
-- per-day residuals are saved to `plots/basecorr_surface_residuals_<date>.csv`,
-- per-day surface is saved to `plots/basecorr_surface_basis_adjusted_<date>.png`.
-
-### 3) Continuous PCHIP Smiles + Surface
-
-Single day:
+5. Historical surface analytics + PCA artifacts
 
 ```bash
-python scripts/plot_continuous_basecorr_pchip.py --date 2024-12-03
+python3 scripts/analyze_basecorr_timeseries.py --max-days 30 --run-pca --outdir outputs
 ```
 
-Compare two days side-by-side:
+6. Node-level correlation sensitivity
 
 ```bash
-python scripts/plot_continuous_basecorr_pchip.py --date 2024-11-25 --compare-date 2024-12-01
+python3 scripts/run_node_correlation_sensitivity.py --date 2024-12-03 --outdir outputs/corr_sensitivity
 ```
 
-Options:
-
-- `--smile-tenors` (default: all available tenors),
-- interactive plots on by default (`--no-show` to disable).
-
-### 4) Multi-Day Diagnostics (Heatmap + PCA)
+7. Factor risk decomposition (project node sensitivity to PC space)
 
 ```bash
-python scripts/analyze_basecorr_timeseries.py --max-days 30
+python3 scripts/run_factor_risk_decomposition.py \
+  --sens-file outputs/corr_sensitivity/node_level_sensitivities.csv \
+  --pca-dir outputs \
+  --outdir outputs/factor_risk
 ```
 
-With PCA artifacts:
+8. Scenario-based correlation hedging diagnostics
 
 ```bash
-python scripts/analyze_basecorr_timeseries.py --max-days 30 --run-pca
+python3 scripts/run_scenario_correlation_hedging.py \
+  --input outputs/factor_risk/factor_exposures_by_tranche.csv \
+  --factor-scores outputs/factor_risk/factor_scores.csv \
+  --outdir outputs/scenario_hedging
 ```
 
-Key outputs:
+## Output Dependency Checkpoints
 
-- `plots/basecorr_daily_diagnostics.csv`
-- `plots/basecorr_node_timeseries.csv`
-- `plots/heatmap_mean_abs_delta_rho.png`
-- `plots/heatmap_p95_abs_delta_rho.png`
-- `plots/basecorr_abs_delta_heatmap_matrix.csv`
-- `plots/surface_move_stats.json`
-- `plots/pca_explained_variance.png`
-- `plots/pc1_loadings_heatmap.png`
-- `plots/pc2_loadings_heatmap.png`
-- `plots/pc3_loadings_heatmap.png` (if available)
-- `plots/pc_scores_timeseries.csv`
-- `plots/pc1_vs_spreaddiff_corr.txt`
+If these files exist, the project can proceed end-to-end:
 
-## Model Notes
+1. From Step 5 (PCA foundation):
+- `outputs/basecorr_node_timeseries.csv`
+- `outputs/pca_loadings.csv`
+- `outputs/pca_explained_variance.csv`
 
-- Tranche pricing uses deterministic LHP + Gauss-Hermite quadrature.
-- Premium/protection legs use improved discretization:
-  - trapezoid premium leg + accrual-on-default approximation,
-  - midpoint-style protection discounting on loss increments.
-- Base-correlation convention:
-  - tranche `(k1,k2)` uses `PV(0,k2;rho(k2)) - PV(0,k1;rho(k1))`.
+2. From Step 6:
+- `outputs/corr_sensitivity/node_level_sensitivities.csv`
+
+3. From Step 7:
+- `outputs/factor_risk/factor_exposures_by_tranche.csv`
+- `outputs/factor_risk/factor_scores.csv`
+
+4. From Step 8:
+- `outputs/scenario_hedging/data/scenario_hedging_summary.csv`
+- `outputs/scenario_hedging/plots/vol_reduction_method_comparison.png`
+
+## Framework Map (How Components Connect)
+
+1. Pricing core (GC/LHP)
+- `src/copula_lhp.py`
+- `src/pricer_tranche.py`
+
+2. Curves and basis adjustment
+- `src/curves.py`
+- `src/basis.py`
+- `src/basis_adjustment_utils.py`
+- `src/io_data.py`
+
+3. Base-correlation calibration and interpolation
+- `src/calibration_basecorr_relaxed.py`
+- `src/interpolation.py`
+- `scripts/risk_engine_common.py` (shared risk script utilities)
+
+4. Time-series/PCA analytics
+- `scripts/analyze_basecorr_timeseries.py`
+- `scripts/run_pca_explained_variance.py` (supplementary)
+
+5. Risk analytics engines
+- `scripts/run_node_correlation_sensitivity.py`
+- `scripts/run_factor_risk_decomposition.py`
+- `scripts/run_scenario_correlation_hedging.py`
+
+## Script Classification
+
+Core scripts (must keep for primary workflow):
+
+- `run_daily.py`
+- `plot_basis_adjustment.py`
+- `plot_basecorr_surface.py`
+- `plot_continuous_basecorr_pchip.py`
+- `analyze_basecorr_timeseries.py`
+- `run_node_correlation_sensitivity.py`
+- `run_factor_risk_decomposition.py`
+- `run_scenario_correlation_hedging.py`
+- `risk_engine_common.py`
+
+Extended analytics (optional but useful):
+
+- `run_scenario_stress_tests.py`
+- `run_greek_hedge_stability.py`
+- `build_tranche_risk_dashboard.py`
+- `run_factor_shock_pricing.py`
+
+Research/demo scripts (non-blocking):
+
+- `plot_2D_basecorr.py`
+- `run_loocv.py`
+- `run_tenor_loocv.py`
+
+## Notes
+
+- All spread inputs are interpreted as bps and converted in code.
+- Base-correlation risk and hedging outputs are under `outputs/corr_sensitivity/`, `outputs/factor_risk/`, and `outputs/scenario_hedging/`.
+- Scenario hedging outputs are split by type:
+  - tabular data: `outputs/scenario_hedging/data/`
+  - figures: `outputs/scenario_hedging/plots/`
 
 ## Project Layout
 
 ```text
 cdx-engine/
-  data/         input CSVs
-  src/          pricing/calibration/basis modules
-  scripts/      analysis/plot entrypoints
-  tests/        unit tests
-  notebooks/    exploratory work
-  plots/        generated charts/tables
+  data/                     raw market inputs
+  src/                      pricing/calibration/risk core modules
+  scripts/                  runnable analytics entrypoints
+  tests/                    unit tests
+  outputs/                  generated artifacts
+    corr_sensitivity/
+    factor_risk/
+    scenario_hedging/
+      data/
+      plots/
 ```

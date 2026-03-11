@@ -23,7 +23,7 @@ def _parse_args() -> argparse.Namespace:
         description="Build theoretical vs market index curves and plot beta term structures."
     )
     parser.add_argument("--date", type=str, default=None, help="Date to run (YYYY-MM-DD). Defaults to latest valid.")
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory.")
+    parser.add_argument("--outdir", type=str, default="outputs/plot_index_beta_dual_curve", help="Output directory.")
     parser.add_argument("--recovery", type=float, default=0.4, help="Index recovery assumption.")
     parser.add_argument("--theoretical-col", type=str, default="Index_0_100_Spread", help="Theoretical spread column (bps).")
     parser.add_argument("--market-col", type=str, default="Index_Mid", help="Market spread column (bps).")
@@ -92,7 +92,10 @@ def main() -> None:
     )
 
     outdir = ROOT / args.outdir
-    outdir.mkdir(parents=True, exist_ok=True)
+    data_dir = outdir / "data"
+    plot_dir = outdir / "plots"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    plot_dir.mkdir(parents=True, exist_ok=True)
 
     diagnostics = pd.DataFrame(
         {
@@ -110,7 +113,7 @@ def main() -> None:
             "lambda_residual": mkt_lambda - beta_knot * np.maximum(theo_lambda, 0.0),
         }
     )
-    csv_path = outdir / f"index_beta_dual_curve_{target_date}.csv"
+    csv_path = data_dir / f"index_beta_dual_curve_{target_date}.csv"
     diagnostics.to_csv(csv_path, index=False)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -151,7 +154,7 @@ def main() -> None:
     ax.legend()
 
     fig.tight_layout()
-    plot_path = outdir / f"index_beta_dual_curve_{target_date}.png"
+    plot_path = plot_dir / f"index_beta_dual_curve_{target_date}.png"
     fig.savefig(plot_path, dpi=200)
 
     logging.info("Saved diagnostics CSV: %s", csv_path)

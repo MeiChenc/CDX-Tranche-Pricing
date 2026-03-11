@@ -37,7 +37,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--n-quad", type=int, default=64, help="Gauss-Hermite nodes for tranche pricing.")
     parser.add_argument("--grid-size", type=int, default=200, help="Grid size for rho search.")
-    parser.add_argument("--outdir", type=str, default="plots", help="Output directory.")
+    parser.add_argument("--outdir", type=str, default="outputs/plot_continuous_basecorr_pchip/plots", help="Output directory.")
     parser.add_argument("--log-level", type=str, default="INFO", help="Logging level.")
     parser.add_argument("--no-show", action="store_true", help="Do not open interactive matplotlib windows.")
     return parser.parse_args()
