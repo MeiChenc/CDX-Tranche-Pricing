@@ -164,12 +164,14 @@ def _implied_upfront_pct_portfolio(model_prot: float, model_prem: float, running
     return 100.0 * float(model_prot - running_spread * model_prem)
 
 
-def _print_table(hide_tenor: float, rows: List[Tuple[str, float, float, float]]) -> None:
+def _print_table(hide_tenor: float, rows: List[Tuple[str, float, float, float, float, float]]) -> None:
     print(f"--- Running Tenor LOOCV (Hiding {hide_tenor:.1f}Y) ---")
-    print(f"{'Tranche':<8} | {'Mkt Price':>10} | {'Pred Price':>10} | {'Upfront(bp)':>11} | {'Diff':>8}")
-    for label, mkt, pred, upfront_bp in rows:
-        diff = pred - mkt
-        print(f"{label:<8} | {mkt:>10.2f} | {pred:>10.2f} | {upfront_bp:>11.2f} | {diff:>8.2f}")
+    print(
+        f"{'Tranche':<8} | {'Mkt Quote':>10} | {'Pred Quote':>10} | {'Quote Err':>10} | "
+        f"{'PV Error':>10} | {'Upfront(bp)':>11}"
+    )
+    for label, mkt, pred, quote_err, pv_err, upfront_bp in rows:
+        print(f"{label:<8} | {mkt:>10.2f} | {pred:>10.2f} | {quote_err:>10.2f} | {pv_err:>10.6f} | {upfront_bp:>11.2f}")
 
 
 def _debug_equity_legs(tag: str, running_spread: float, model_prot: float, model_prem: float, width: float) -> None:
@@ -287,7 +289,7 @@ def main() -> None:
     )
 
     spreads_test, upfronts_test, _ = _row_quotes(test_row)
-    table_rows: List[Tuple[str, float, float, float]] = []
+    table_rows: List[Tuple[str, float, float, float, float, float]] = []
     for i, k2 in enumerate(dets):
         k1 = 0.0 if i == 0 else dets[i - 1]
         rho_k2 = rho_pred[k2]
@@ -324,8 +326,17 @@ def main() -> None:
         else:
             mkt_price = 10000.0 * spreads_test[k2]
             pred_price = _implied_spread_bps(model_prot, model_prem)
+
+        # Unified valuation error in PV space:
+        # PV_model_quote := model_prot - c * model_prem
+        # PV_market_quote := upfront * tranche_width
+        pv_model_quote = float(model_prot - spreads_test[k2] * model_prem)
+        pv_market_quote = float(upfronts_test.get(k2, 0.0) * (k2 - k1))
+        pv_error = pv_model_quote - pv_market_quote
+
+        quote_error = float(pred_price - mkt_price)
         upfront_bp = 100.0 * float(upfronts_test.get(k2, 0.0))
-        table_rows.append((labels[i], float(mkt_price), float(pred_price), upfront_bp))
+        table_rows.append((labels[i], float(mkt_price), float(pred_price), quote_error, float(pv_error), upfront_bp))
 
     _print_table(hide_tenor, table_rows)
 
