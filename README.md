@@ -1,888 +1,338 @@
-G–VG + Switching Correlation Model for Multi-Tenor CDX Tranche Calibration
-
-This repository implements a Generalized Variance-Gamma (G–VG) mixture copula with switching correlation to calibrate CDX index tranche spreads across all maturities and construct the Gaussian-equivalent base correlation surface.
-
-The model is designed for production-grade quantitative credit modeling, capturing systemic heavy tails, default clustering, and state-dependent correlation dynamics.
-
-1. Objective
-
-The goal is to reproduce market tranche spreads by calibrating a flexible dependence structure that accounts for:
-
-Heavy-tailed systemic shocks
-
-Correlation jumps in stress regimes
-
-Maturity-specific correlation dynamics
-
-Consistency with market-implied survival curves
-
-The outputs include:
-
-Per-maturity calibrated dependence parameters
-
-Model tranche PVs and implied spreads
-
-Gaussian-equivalent base correlation surface
-
-2. Model Architecture
-
-The dependence structure is driven by two latent layers:
-
-2.1 Systemic Factor – G–VG Mixture
-
-The systemic factor is:
-
-𝑌
-∼
-𝑝
-(
-𝑇
-)
- 
-𝑁
-(
-0
-,
-1
-)
-+
-(
-1
-−
-𝑝
-(
-𝑇
-)
-)
- 
-𝑉
-𝐺
-(
-𝜆
-,
-𝛼
-,
-𝛽
-,
-𝜇
-)
-Y∼p(T)N(0,1)+(1−p(T))VG(λ,α,β,μ)
-
-𝑝
-(
-𝑇
-)
-p(T): probability of normal regime (calibrated per maturity)
-
-𝑉
-𝐺
-(
-⋅
-)
-VG(⋅): Variance-Gamma distribution controlling heavy-tail stress
-
-VG parameters 
-(
-𝜆
-,
-𝛼
-,
-𝛽
-,
-𝜇
-)
-(λ,α,β,μ): global fixed parameters
-
-VG Sampling (Gamma-mixture representation)
-𝑌
-=
-𝜇
-+
-𝛽
-𝐺
-+
-𝛼
-𝐺
-𝑍
-Y=μ+βG+α
-G
-	​
-
-Z
-
-with
-
-𝑍
-∼
-𝑁
-(
-0
-,
-1
-)
-Z∼N(0,1)
-
-𝐺
-∼
-G
-a
-m
-m
-a
-(
-𝑐
-,
-1
-/
-𝑐
-)
-G∼Gamma(c,1/c)
-
-This method avoids scipy.variance_gamma and is numerically stable.
-
-2.2 Switching Correlation Layer
-
-The correlation regime is driven by another latent variable:
-
-𝑍
-𝜌
-∼
-𝐵
-𝑒
-𝑟
-(
-𝑝
-′
-(
-𝑇
-)
-)
-Z
-ρ
-	​
-
-∼Ber(p
-′
-(T))
-𝜌
-(
-𝑇
-)
-=
-{
-𝜌
-𝐻
-(
-𝑇
-)
-,
-	
-𝑍
-𝜌
-=
-1
-
-
-𝜂
-(
-𝑇
-)
-,
-	
-𝑍
-𝜌
-=
-0
-ρ(T)={
-ρ
-H
-	​
-
-(T),
-η(T),
-	​
-
-Z
-ρ
-	​
-
-=1
-Z
-ρ
-	​
-
-=0
-	​
-
-
-𝑝
-′
-(
-𝑇
-)
-p
-′
-(T): probability of high-correlation stress
-
-𝜌
-𝐻
-(
-𝑇
-)
-ρ
-H
-	​
-
-(T): correlation level under systemic stress
-
-𝜂
-(
-𝑇
-)
-η(T): benign low-correlation level
-
-This produces realistic correlation jumps and term-structure behavior.
-
-3. Default Model
-
-Each name 
-𝑗
-j has latent variable:
-
-𝑋
-𝑗
-=
-𝜌
- 
-𝑌
-+
-1
-−
-𝜌
- 
-𝜀
-𝑗
-,
-𝜀
-𝑗
-∼
-𝑁
-(
-0
-,
-1
-)
-X
-j
-	​
-
-=
-ρ
-	​
-
-Y+
-1−ρ
-	​
-
-ε
-j
-	​
-
-,ε
-j
-	​
-
-∼N(0,1)
-
-Default occurs if 
-𝑋
-𝑗
-≤
-𝑥
-crit
-(
-𝑇
-)
-X
-j
-	​
-
-≤x
-crit
-	​
-
-(T).
-
-The threshold satisfies:
-
-Pr
-⁡
-(
-𝑋
-𝑗
-≤
-𝑥
-crit
-)
-=
-1
-−
-𝑒
-−
-𝜆
-(
-𝑇
-)
-𝑇
-Pr(X
-j
-	​
-
-≤x
-crit
-	​
-
-)=1−e
-−λ(T)T
-
-where 
-𝜆
-(
-𝑇
-)
-λ(T) is the bootstrapped index hazard rate.
-
-Threshold is solved via integral root search:
-
-𝑝
-default
-(
-𝑇
-)
-=
-𝐸
-𝑌
- ⁣
-[
-Φ
- ⁣
-(
-𝑥
-crit
-−
-𝜌
-𝑌
-1
-−
-𝜌
-)
-]
-p
-default
-	​
-
-(T)=E
-Y
-	​
-
-[Φ(
-1−ρ
-	​
-
-x
-crit
-	​
-
-−
-ρ
-	​
-
-Y
-	​
-
-)]
-4. Survival Curve Construction
-
-For each maturity 
-𝑇
-T:
-
-Bootstrap a flat hazard rate 
-𝜆
-(
-𝑇
-)
-λ(T)
-
-Match index CDS PV using protection/premium leg equality
-
-P
-V
-p
-r
-o
-t
-(
-𝜆
-)
-=
-P
-V
-p
-r
-e
-m
-(
-𝜆
-;
-𝑠
-𝑇
-)
-PV
-prot
-	​
-
-(λ)=PV
-prem
-	​
-
-(λ;s
-T
-	​
-
-)
-
-This yields:
-
-𝑝
-default
-(
-𝑇
-)
-=
-1
-−
-𝑒
-−
-𝜆
-(
-𝑇
-)
-𝑇
-p
-default
-	​
-
-(T)=1−e
-−λ(T)T
-
-These probabilities are used to solve 
-𝑥
-crit
-x
-crit
-	​
-
-.
-
-5. Tranche Pricing
-
-For each tranche 
-[
-𝐾
-1
-,
-𝐾
-2
-]
-[K
-1
-	​
-
-,K
-2
-	​
-
-] and maturity 
-𝑇
-T:
-
-Draw latent regime:
-
-𝑌
-∼
-Y∼ G–VG mixture
-
-𝜌
-=
-𝜌
-𝐻
-(
-𝑇
-)
-ρ=ρ
-H
-	​
-
-(T) or 
-𝜂
-(
-𝑇
-)
-η(T)
-
-Compute conditional default probability:
-
-𝑝
-(
-𝑦
-)
-=
-Φ
- ⁣
-(
-𝑥
-crit
-−
-𝜌
- 
-𝑦
-1
-−
-𝜌
-)
-p(y)=Φ(
-1−ρ
-	​
-
-x
-crit
-	​
-
-−
-ρ
-	​
-
-y
-	​
-
-)
-
-Simulate defaults across the homogeneous pool
-
-Compute:
-
-Expected Tranche Loss (EL)
-
-Risky PV01 (RP)
-
-Model running spread:
-
-𝑠
-𝑚
-𝑜
-𝑑
-𝑒
-𝑙
-=
-𝐸
-𝐿
-𝑅
-𝑃
-×
-10,000
- bps
-s
-model
-=
-RP
-EL
-	​
-
-×10,000 bps
-
-Monte Carlo paths:
-
-300k for pricing
-
-Vectorized for performance
-
-6. Calibration
-
-For each maturity 
-𝑇
-T, calibrate:
-
-𝑝
-(
-𝑇
-)
-,
-𝑝
-′
-(
-𝑇
-)
-,
-𝜌
-𝐻
-(
-𝑇
-)
-,
-𝜂
-(
-𝑇
-)
-p(T),p
-′
-(T),ρ
-H
-	​
-
-(T),η(T)
-	​
-
-
-Objective:
-
-min
-⁡
-𝜃
-(
-𝑇
-)
-∑
-𝑘
-𝑤
-𝑘
-(
-𝑠
-𝑘
-𝑚
-𝑜
-𝑑
-𝑒
-𝑙
-(
-𝑇
-)
-−
-𝑠
-𝑘
-𝑚
-𝑎
-𝑟
-𝑘
-𝑒
-𝑡
-(
-𝑇
-)
-)
-2
-θ(T)
-min
-	​
-
-k
-∑
-	​
-
-w
-k
-	​
-
-(s
-k
-model
-	​
-
-(T)−s
-k
-market
-	​
-
-(T))
-2
-
-where 
-𝑘
-k indexes tranches
-and 
-𝑤
-𝑘
-w
-k
-	​
-
- upweights equity tranche.
-
-VG parameters 
-(
-𝜆
-,
-𝛼
-,
-𝛽
-,
-𝜇
-)
-(λ,α,β,μ) remain global fixed.
-
-7. Base Correlation Surface
-
-For each maturity 
-𝑇
-T and base detachment 
-𝐾
-K:
-
-Solve for Gaussian copula correlation 
-𝜌
-𝐺
-(
-𝑇
-,
-𝐾
-)
-ρ
-G
-	​
-
-(T,K):
-
-𝑃
-𝑉
-Gauss
-(
-𝑇
-,
-𝐾
-;
-𝜌
-𝐺
-)
-=
-𝑃
-𝑉
-GVG
-(
-𝑇
-,
-𝐾
-;
-𝜃
-^
-𝑇
-)
-PV
-Gauss
-	​
-
-(T,K;ρ
-G
-	​
-
-)=PV
-GVG
-	​
-
-(T,K;
-θ
-^
-T
-	​
-
-)
-
-This produces a full base correlation surface
-compatible with standard trading-desk risk systems.
-
-8. Parameter Summary
-Global Fixed Parameters (Not Calibrated)
-Parameter	Meaning
-
-𝜆
-λ	VG shape
-
-𝛼
-α	VG scale (vol component)
-
-𝛽
-β	VG skew
-
-𝜇
-μ	VG location
-
-These control systemic heavy-tail behavior.
-
-Per-Maturity Calibrated Parameters
-Parameter	Meaning
-
-𝑝
-(
-𝑇
-)
-p(T)	Normal vs heavy-tail mixture weight
-
-𝑝
-′
-(
-𝑇
-)
-p
-′
-(T)	High-correlation regime probability
-
-𝜌
-𝐻
-(
-𝑇
-)
-ρ
-H
-	​
-
-(T)	Stress correlation level
-
-𝜂
-(
-𝑇
-)
-η(T)	Low-correlation level
-
-These shape the dependence structure required to fit market tranche spreads.
-
-9. Advantages
-
-Captures heavy tails and systemic clustering
-
-Supports correlation jumps during crises
-
-Produces realistic maturity term structure
-
-More flexible than Gaussian & t-copula
-
-Stable calibration and interpretation
-
-10. Repository Structure
-/code
-    gvg_model.py                # Core G–VG mixture copula implementation
-    tranche_pricer.py           # Monte Carlo tranche pricer
-    calibration.py              # Per-maturity calibration routines
-/data
-    cdx_market_data_multi_tenor.json
-/output
-    base_correlation_surface.csv
-README.md
-
-11. References
-
-Li (2000), Gaussian Copula model
-
-Madan & Seneta (1990), Variance-Gamma processes
-
-Duffie & Singleton (2003), Credit Risk Modeling
-
-Market practice from CDO/tranche desks (JPM, Citi, BAML)
+# CDX Tranche Pricing
+
+This repository is a CDX tranche pricing and correlation analytics project built around the `cdx-engine/` package.
+
+At a high level, it does four things:
+
+1. reads index, tranche, constituent, and OIS market data
+2. bootstraps hazard curves and applies basis adjustments
+3. calibrates Gaussian-equivalent base-correlation smiles and surfaces
+4. runs validation and risk analytics such as LOOCV, PCA, node sensitivities, and hedging studies
+
+The current production-style code lives in [cdx-engine](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine). The [legacy](/Users/ginachen/Desktop/CDX-Tranche-Pricing/legacy) folder contains earlier notebooks, plots, and raw research artifacts.
+
+## Repository Map
+
+```text
+CDX-Tranche-Pricing/
+  cdx-engine/
+    src/          core pricing, calibration, basis, interpolation, and risk modules
+    scripts/      runnable workflows and analytics entry points
+    tests/        pytest suite for pricing, calibration, basis, and arbitrage checks
+    data/         local CSV inputs
+    outputs/      generated tables and plots
+    notebooks/    research and workflow notebooks
+    configs/      runtime parameters
+  legacy/         older notebooks and exploratory outputs
+```
+
+## What The Project Models
+
+The engine prices tranche expected loss and tranche PVs under a one-factor Gaussian copula in the large homogeneous portfolio approximation.
+
+The core modeling flow is:
+
+1. bootstrap an index survival curve from quoted index spreads
+2. optionally bootstrap constituent curves and apply a beta-style basis adjustment so constituent-implied loss matches index-implied loss
+3. price base tranches `0-K` under candidate correlations
+4. solve for base correlation at each detachment so model PV matches tranche quotes
+5. interpolate those calibrated nodes across detachment and tenor to get a continuous surface
+6. use that surface for validation, scenario analysis, and risk decomposition
+
+This repo does not currently route the top-level workflow through the older G-VG text in the previous root README. The code in `cdx-engine/src/` is centered on Gaussian copula LHP plus base-correlation analytics.
+
+## Input Data
+
+The main input files are expected under [cdx-engine/data](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/data):
+
+- `cdx_timeseries.csv`: index and tranche quotes by date and tenor
+- `constituents_timeseries.csv`: constituent CDS spreads and recovery metadata
+- `ois_timeseries.csv`: OIS discount curve points by date and tenor
+
+The loader in [io_data.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/io_data.py) normalizes column names, parses tenor strings like `5Y` or `3M`, and builds `MarketSnap` objects containing:
+
+- available tenors for a date
+- index quotes
+- tranche quotes
+- constituent spreads
+- a simple stale/bad-date flag
+
+## End-To-End Walkthrough
+
+### 1. Data QC and market snapshots
+
+Start with [run_daily.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_daily.py).
+
+It reads [params.yaml](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/configs/params.yaml), loads the market files, and flags dates that look unreliable based on:
+
+- minimum constituent coverage
+- large quote jumps on sparse dates
+
+This is the ingestion and sanity-check step.
+
+### 2. Discount and hazard curves
+
+Two curve objects drive most of the engine:
+
+- discount curve from OIS data via `read_ois_discount_curve(...)`
+- default curve via [curves.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/curves.py)
+
+Important pieces in `curves.py`:
+
+- `Curve.survival(t)`: piecewise-constant hazard survival probability
+- `bootstrap_from_cds_spreads(...)`: bootstraps hazard rates from CDS par spreads
+- `build_index_curve(...)`: builds the index hazard curve
+
+Assumptions baked into the bootstrap:
+
+- spreads are decimal inside the engine
+- quarterly premium payments by default
+- half-period accrual-on-default approximation
+- optional OIS discounting
+
+### 3. Basis adjustment
+
+The code does not rely only on the raw index curve. It can build a basis-adjusted curve that uses constituent information to reconcile bottom-up and top-down loss views.
+
+Relevant files:
+
+- [basis.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/basis.py)
+- [basis_adjustment_utils.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/basis_adjustment_utils.py)
+
+The workflow is:
+
+1. bootstrap constituent hazard curves from constituent CDS spreads
+2. expand them onto the index tenor grid
+3. solve for a tenor-by-tenor beta scaling so average constituent expected loss matches the index expected loss
+4. rebuild an adjusted average curve
+
+That adjusted curve is then used as the survival input for tranche pricing and base-correlation calibration.
+
+This is an important project choice: correlation is calibrated on top of a survival curve that has already been basis-adjusted.
+
+### 4. Tranche pricing
+
+The tranche pricer is implemented in:
+
+- [copula_lhp.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/copula_lhp.py)
+- [pricer_tranche.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/pricer_tranche.py)
+
+The mechanics are:
+
+1. for a given systemic factor draw, compute conditional default probability under a one-factor Gaussian copula
+2. convert it into conditional portfolio loss
+3. clip that portfolio loss into tranche loss for `K1-K2`
+4. integrate with Gauss-Hermite quadrature
+5. aggregate expected loss increments into premium and protection legs
+
+Key functions:
+
+- `conditional_default_prob(...)`
+- `tranche_expected_loss(...)`
+- `price_tranche_lhp(...)`
+
+`price_tranche_lhp(...)` returns a `TranchePV` object with:
+
+- `premium_leg`
+- `protection_leg`
+- `pv = protection_leg - premium_leg`
+
+### 5. Base-correlation calibration
+
+Calibration is in:
+
+- [calibration_basecorr.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/calibration_basecorr.py)
+- [calibration_basecorr_relaxed.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/calibration_basecorr_relaxed.py)
+
+The project uses the standard base-correlation decomposition:
+
+`PV(K1,K2) = PV(0,K2 ; rho(K2)) - PV(0,K1 ; rho(K1))`
+
+For each tenor, detachments such as `3%`, `7%`, `10%`, and `15%` are solved sequentially.
+
+There are two calibration styles in the code:
+
+- exact bracketing/root solve in `calibration_basecorr.py`
+- more forgiving scan-plus-minimization logic in `calibration_basecorr_relaxed.py`
+
+The relaxed version is the main workhorse in the scripts because real market quotes do not always bracket perfectly.
+
+### 6. Interpolation into a surface
+
+Once node calibrations exist by tenor and detachment, [interpolation.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/interpolation.py) builds a continuous surface using `PchipInterpolator`.
+
+Interpolation is done in two stages:
+
+1. interpolate across tenor for each fixed detachment
+2. interpolate across detachment at the requested tenor
+
+PCHIP is used to preserve shape better than a naive cubic spline.
+
+### 7. Arbitrage checks
+
+[arbitrage.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/arbitrage.py) provides simple monotonicity checks and a basic smile fix:
+
+- detect non-monotone smiles across detachment
+- detect non-monotone term structures across tenor
+- optionally enforce monotonicity with cumulative maxima
+
+### 8. Validation with LOOCV
+
+The LOOCV logic most relevant to your earlier question is in:
+
+- [run_tenor_loocv.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_tenor_loocv.py)
+
+This script does two related validations.
+
+First, tenor LOOCV:
+
+1. hide an entire tenor, for example `7Y`
+2. calibrate base-correlation smiles on the remaining tenors
+3. interpolate the surface back to the hidden tenor
+4. compare predicted hidden-tenor correlations and implied spreads against the actual calibrated tenor
+
+Second, restricted point LOOCV inside a smile:
+
+1. take a calibrated smile for a tenor
+2. hide a middle detachment such as `7%` or `10%`
+3. interpolate from the remaining smile nodes
+4. compare the predicted node with the actual calibrated node
+
+That second plot is the one you shared earlier. The red `X` is the interpolated prediction at the hidden detachment, and the blue point is the actual calibrated node.
+
+### 9. Time-series analytics and risk
+
+Once daily surfaces are calibrated, the project extends into correlation risk analytics.
+
+Main scripts:
+
+- [plot_basecorr_surface.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/plot_basecorr_surface.py)
+- [plot_continuous_basecorr_pchip.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/plot_continuous_basecorr_pchip.py)
+- [analyze_basecorr_timeseries.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/analyze_basecorr_timeseries.py)
+- [run_node_correlation_sensitivity.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_node_correlation_sensitivity.py)
+- [run_factor_risk_decomposition.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_factor_risk_decomposition.py)
+- [run_scenario_correlation_hedging.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_scenario_correlation_hedging.py)
+
+These scripts produce:
+
+- daily node calibration snapshots
+- continuous smile and surface plots
+- PCA on historical base-correlation moves
+- node-level tranche sensitivities
+- mapping of node risks into factor space
+- scenario-based hedge diagnostics
+
+There are also optional scripts for:
+
+- stress testing
+- factor shock pricing
+- Greek hedge stability
+- tranche risk dashboards
+
+## Core Files By Responsibility
+
+### Pricing core
+
+- [copula_lhp.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/copula_lhp.py)
+- [pricer_tranche.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/pricer_tranche.py)
+- [utils_math.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/utils_math.py)
+
+### Curves and market data
+
+- [io_data.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/io_data.py)
+- [curves.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/curves.py)
+- [dates.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/dates.py)
+
+### Basis adjustment
+
+- [basis.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/basis.py)
+- [basis_adjustment_utils.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/basis_adjustment_utils.py)
+
+### Correlation calibration and interpolation
+
+- [calibration_basecorr.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/calibration_basecorr.py)
+- [calibration_basecorr_relaxed.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/calibration_basecorr_relaxed.py)
+- [interpolation.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/interpolation.py)
+- [arbitrage.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/arbitrage.py)
+- [loocv.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/loocv.py)
+
+### Risk and hedging
+
+- [risk.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/risk.py)
+- [hedging.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/hedging.py)
+
+## How To Run
+
+Setup:
+
+```bash
+cd cdx-engine
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Recommended core workflow:
+
+```bash
+python3 scripts/run_daily.py
+python3 scripts/plot_basis_adjustment.py --date 2024-12-03 --outdir outputs
+python3 scripts/plot_basecorr_surface.py --all-days --outdir outputs
+python3 scripts/plot_continuous_basecorr_pchip.py --date 2024-12-03 --outdir outputs --no-show
+python3 scripts/analyze_basecorr_timeseries.py --max-days 30 --run-pca --outdir outputs
+python3 scripts/run_node_correlation_sensitivity.py --date 2024-12-03 --outdir outputs/run_node_correlation_sensitivity
+python3 scripts/run_factor_risk_decomposition.py --sens-file outputs/run_node_correlation_sensitivity/data/node_level_sensitivities.csv --pca-dir outputs/analyze_basecorr_timeseries --outdir outputs/run_factor_risk_decomposition
+python3 scripts/run_scenario_correlation_hedging.py --input outputs/run_factor_risk_decomposition/data/factor_exposures_by_tranche.csv --factor-scores outputs/analyze_basecorr_timeseries/data/factor_scores.csv --outdir outputs/run_scenario_correlation_hedging
+```
+
+LOOCV example:
+
+```bash
+python3 scripts/run_tenor_loocv.py --hide-tenor 7 --date 2024-12-03
+```
+
+## Testing
+
+The test suite lives under [cdx-engine/tests](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/tests) and covers:
+
+- LHP loss logic
+- tranche pricing behavior
+- curve bootstrap behavior
+- basis adjustment
+- calibration
+- arbitrage checks
+
+Run:
+
+```bash
+cd cdx-engine
+python3 -m pytest -q
+```
+
+## Output Conventions
+
+Generated artifacts are usually written under [cdx-engine/outputs](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/outputs), grouped by script name. Most folders contain:
+
+- `data/` for CSV or text diagnostics
+- `plots/` for charts
+
+Examples already committed in the repo include:
+
+- calibrated base-correlation surfaces
+- continuous PCHIP smiles
+- LOOCV plots
+- PCA heatmaps
+- factor exposure tables
+- scenario hedging diagnostics
+
+## What To Read First
+
+If you want to understand the repo quickly, read in this order:
+
+1. [cdx-engine/README.md](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/README.md)
+2. [curves.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/curves.py)
+3. [pricer_tranche.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/pricer_tranche.py)
+4. [calibration_basecorr_relaxed.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/src/calibration_basecorr_relaxed.py)
+5. [run_tenor_loocv.py](/Users/ginachen/Desktop/CDX-Tranche-Pricing/cdx-engine/scripts/run_tenor_loocv.py)
+
+That sequence gets you from market data to curves to pricing to smile calibration to validation.
