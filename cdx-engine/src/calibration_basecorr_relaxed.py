@@ -20,16 +20,12 @@ def calibrate_basecorr_relaxed(
     payment_freq: int,
     disc_curve=None,
     return_status: bool = False,
-    quote_convention: str = "dual_quote",
 ):
     """
     Coarse grid base correlation calibration by minimizing absolute PV error.
     Uses base correlation convention:
         PV(K1,K2) = PV(0,K2; rho(K2)) - PV(0,K1; rho(K1))
     """
-    if quote_convention not in {"spread_only", "dual_quote"}:
-        raise ValueError(f"Unsupported quote_convention={quote_convention!r}")
-
     calibrated: Dict[float, float] = {}
     statuses: Dict[float, str] = {}
     dets = sorted(dets)
@@ -97,9 +93,8 @@ def calibrate_basecorr_relaxed(
             else:
                 model_prot = base_pv_k2.protection_leg - base_pv_k1.protection_leg
                 model_prem = base_pv_k2.premium_leg - base_pv_k1.premium_leg
-            if quote_convention == "spread_only":
-                return model_prot - spread * model_prem
-            return model_prot - spread * model_prem - upfront * tranche_width
+            return model_prot - spread * model_prem # - upfront * tranche_width 
+                    # Only par spread need upfront payment to adjusted the legs equality
                     
         rho_best, status = solve_rho_for_tranche(
             objective,
